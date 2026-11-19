@@ -1,47 +1,46 @@
 import * as T from 'three'
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
 import { TransformControls } from 'three/addons/controls/TransformControls.js'
-import { makeFactory } from './factory'
-
-export const keyframes = [
-  { frame: 0, name: 'Ready', lift: 0, reach: 0, wrist: 0 },
-  { frame: 30, name: 'Approach', lift: -0.3, reach: 0.12, wrist: 0.18 },
-  { frame: 60, name: 'Assemble', lift: -0.4, reach: -0.08, wrist: 0.43 },
-  { frame: 90, name: 'Retract', lift: 0.16, reach: 0.27, wrist: -0.35 },
-  { frame: 120, name: 'Home', lift: 0, reach: 0, wrist: 0 },
-]
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js'
+import { anglesAt, loadRobot, makeMotionClip } from './robot'
+import modelNotice from '../public/models/ur10e-license.txt?raw'
 
 const axes = ['x', 'y', 'z']
-const poses = { perspective: [9, 6.2, 13], top: [0, 1, 0.001], right: [1, 0, 0], front: [0, 0, 1] }
+const poses = { perspective: [2.05, 2.1, 6.1], top: [0, 1, 0.001], right: [1, 0, 0], front: [0, 0, 1] }
 
-function samplePose(frame, channel) {
-  const next = keyframes.findIndex((item) => item.frame > frame)
-  if (next === -1) return keyframes.at(-1)[channel]
-  const a = keyframes[next - 1]
-  const b = keyframes[next]
-  const progress = (frame - a.frame) / (b.frame - a.frame)
-  return T.MathUtils.lerp(a[channel], b[channel], progress * progress * (3 - 2 * progress))
-}
-
-export function createViewport(element, { onSelect, onChange, onOrbit }) {
+export async function createViewport(element, { onSelect, onChange, onOrbit, signal }) {
+  const robot = await loadRobot()
+  signal.throwIfAborted()
+  const { plant, objects, pivots, visuals } = robot
+  const linkVisuals = Object.fromEntries(visuals.map(({ id, node }) => [id, node]))
+  let explosion = 0
+  robot.setAngles(anglesAt(0))
   const scene = new T.Scene()
   scene.background = new T.Color('#21272e')
-  scene.fog = new T.Fog('#21272e', 19, 48)
+  scene.fog = new T.Fog('#21272e', 3.5, 10)
   const renderer = new T.WebGLRenderer({ antialias: true, alpha: false })
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.75))
   renderer.shadowMap.enabled = true
   renderer.shadowMap.type = T.PCFShadowMap
   renderer.toneMapping = T.ACESFilmicToneMapping
-  renderer.toneMappingExposure = 1.22
-  renderer.domElement.setAttribute('aria-label', 'Interactive 3D view of the automotive assembly cell')
+  renderer.toneMappingExposure = 1.11
+  renderer.domElement.setAttribute('aria-label', 'Interactive 3D view of the Universal Robots UR10e')
   element.appendChild(renderer.domElement)
 
-  const camera = new T.PerspectiveCamera(39, 1, 0.1, 120)
+  const pmrem = new T.PMREMGenerator(renderer)
+  const room = new RoomEnvironment()
+  const environment = pmrem.fromScene(room, 0.04)
+  scene.environment = environment.texture
+  scene.environmentIntensity = 0.53
+  room.dispose()
+  pmrem.dispose()
+
+  const camera = new T.PerspectiveCamera(38, 1, 0.014, 42)
   const orbit = new OrbitControls(camera, renderer.domElement)
   orbit.enableDamping = true
   orbit.dampingFactor = 0.14
-  orbit.minDistance = 2.5
-  orbit.maxDistance = 55
+  orbit.minDistance = 0.055
+  orbit.maxDistance = 13
   orbit.maxPolarAngle = Math.PI * 0.515
   orbit.mouseButtons.MIDDLE = T.MOUSE.PAN
   let dirty = true
@@ -54,68 +53,59 @@ export function createViewport(element, { onSelect, onChange, onOrbit }) {
   })
 
   const lights = [
-    new T.HemisphereLight('#e2f2ff', '#5f503f', 2.1),
-    new T.DirectionalLight('#fff0d1', 3.0),
-    new T.DirectionalLight('#a0caff', 1.7),
+    new T.HemisphereLight('#dceeff', '#707b91', 1.4),
+    new T.DirectionalLight('#fff3e5', 2.2),
+    new T.DirectionalLight('#b2d5ff', 1.8),
   ]
-  lights[1].position.set(-4, 10, 7)
+  lights[1].position.set(-2.3, 4, 3.1)
   lights[1].castShadow = true
   lights[1].shadow.mapSize.set(2048, 2048)
-  Object.assign(lights[1].shadow.camera, { left: -8, right: 8, top: 8, bottom: -8, near: 0.2, far: 28 })
-  lights[1].shadow.normalBias = 0.025
+  Object.assign(lights[1].shadow.camera, { left: -2.4, right: 2.4, top: 2.4, bottom: -2.4, near: 0.1, far: 11 })
+  lights[1].shadow.normalBias = 0.004
   lights[1].shadow.bias = -0.00013
-  lights[2].position.set(4, 6, -7)
+  lights[2].position.set(2, 3, -2.5)
   scene.add(...lights)
 
-  const floor = new T.Mesh(new T.PlaneGeometry(180, 180), new T.MeshStandardMaterial({ color: '#343c47', roughness: 1 }))
+  const floor = new T.Mesh(new T.PlaneGeometry(60, 60), new T.MeshStandardMaterial({ color: '#2d3540', roughness: 1 }))
   floor.rotation.x = -Math.PI / 2
-  floor.position.y = -0.386
+  floor.position.y = -0.006
   floor.receiveShadow = true
   scene.add(floor)
 
-  const grid = new T.GridHelper(100, 100, '#9ea7ae', '#8c98a3')
-  grid.position.y = -0.378
+  const grid = new T.GridHelper(20, 200, '#9ea7ae', '#8c98a3')
+  grid.position.y = -0.004
   grid.material.transparent = true
-  grid.material.opacity = 0.26
+  grid.material.opacity = 0.22
   grid.material.toneMapped = false
   scene.add(grid)
 
-  const { plant, objects } = makeFactory()
   scene.add(plant)
   const wireframes = new Map()
   plant.traverse((node) => {
-    if (node.isMesh) wireframes.set(node.material, node.material.wireframe)
+    if (!node.isMesh) return
+    const materials = Array.isArray(node.material) ? node.material : [node.material]
+    for (const material of materials) wireframes.set(material, material.wireframe)
   })
   const defaults = Object.fromEntries(Object.entries(objects).map(([id, object]) => [
     id, { position: object.position.clone(), rotation: object.rotation.clone(), scale: object.scale.clone() },
   ]))
 
-  function motionPivot(id) {
-    const object = objects[id]
-    const pivot = new T.Group()
-    pivot.name = id + '_motion'
-    object.add(pivot)
-    for (const child of [...object.children]) {
-      if (child !== pivot) pivot.add(child)
-    }
-    return pivot
-  }
-  const lift = motionPivot('upper')
-  const reach = motionPivot('forearm')
-  const wrist = motionPivot('wrist')
-
   const gizmo = new TransformControls(camera, renderer.domElement)
   gizmo.setSize(0.75)
   gizmo.addEventListener('dragging-changed', (event) => { orbit.enabled = !event.value })
   gizmo.addEventListener('change', () => { dirty = true })
-  gizmo.addEventListener('objectChange', onChange)
+  gizmo.addEventListener('objectChange', () => {
+    if (explosion) robot.separate(explosion)
+    onChange()
+  })
   scene.add(gizmo.getHelper())
 
-  let selected = 'upper'
+  let selected = 'upperarm'
   let mode = 'select'
   const outline = new T.Group()
   scene.add(outline)
-  const outlineMaterial = new T.LineBasicMaterial({ color: '#ffc254', transparent: true, opacity: 0.83 })
+  const outlineMaterial = new T.LineBasicMaterial({ color: '#ffc254', transparent: true, opacity: 0.68 })
+  const edges = new Map()
   let outlinedMeshes = []
 
   function effectivelyVisible(node) {
@@ -138,21 +128,20 @@ export function createViewport(element, { onSelect, onChange, onOrbit }) {
     selected = id
     mode = tool
     gizmo.detach()
-    for (const { line } of outlinedMeshes) line.geometry.dispose()
     outline.clear()
     outlinedMeshes = []
     const object = objects[id]
-    if (!object || !effectivelyVisible(object)) return
+    if (!object || !effectivelyVisible(linkVisuals[id] ?? object)) return
     if (tool !== 'select') {
       gizmo.setMode(tool)
       gizmo.attach(object)
     }
-    object.traverse((node) => {
-      if (!node.isMesh || node.material.map) return
-      let owner = node.parent
-      while (owner && !owner.userData.part) owner = owner.parent
-      if (owner !== object) return
-      const line = new T.LineSegments(new T.EdgesGeometry(node.geometry, 41), outlineMaterial)
+    const visual = linkVisuals[id] ?? object
+    if (id === 'robot') return
+    visual.traverse((node) => {
+      if (!node.isMesh) return
+      if (!edges.has(node.geometry)) edges.set(node.geometry, new T.EdgesGeometry(node.geometry, 55))
+      const line = new T.LineSegments(edges.get(node.geometry), outlineMaterial)
       line.matrixAutoUpdate = false
       outlinedMeshes.push({ source: node, line })
       outline.add(line)
@@ -160,23 +149,27 @@ export function createViewport(element, { onSelect, onChange, onOrbit }) {
   }
 
   function view(name) {
-    orbit.target.set(0, 1.32, 0)
+    orbit.target.set(0.44 + 0.27 * explosion, 0.48 + 0.19 * explosion, -0.04)
     const direction = new T.Vector3(...poses[name]).normalize()
-    const distance = 16.9 * Math.max(1, 1.23 / camera.aspect)
+    const distance = (1.91 + 0.60 * explosion) * Math.max(1, 1.14 / camera.aspect)
     camera.position.copy(orbit.target).addScaledVector(direction, distance)
     orbit.update()
   }
 
   function focus() {
-    const object = objects[selected]
+    const object = linkVisuals[selected] ?? objects[selected]
     if (!object || !effectivelyVisible(object)) return
     scene.updateMatrixWorld()
-    const bounds = new T.Box3().setFromObject(object)
+    const bounds = new T.Box3()
+    object.traverse((node) => {
+      if (!node.isMesh || !effectivelyVisible(node)) return
+      bounds.union(node.geometry.boundingBox.clone().applyMatrix4(node.matrixWorld))
+    })
     if (bounds.isEmpty()) return
     const direction = camera.position.clone().sub(orbit.target).normalize()
     const sphere = bounds.getBoundingSphere(new T.Sphere())
     orbit.target.copy(sphere.center)
-    camera.position.copy(sphere.center).addScaledVector(direction, Math.max(3.5, sphere.radius * 3.3 / Math.min(camera.aspect, 1)))
+    camera.position.copy(sphere.center).addScaledVector(direction, Math.max(0.13, sphere.radius * 3.4 / Math.min(camera.aspect, 1)))
     orbit.update()
   }
 
@@ -229,14 +222,21 @@ export function createViewport(element, { onSelect, onChange, onOrbit }) {
     select: updateSelection,
     view,
     focus,
-    setFrame(frame) {
+    setPose(angles) {
       dirty = true
-      lift.rotation.z = samplePose(frame, 'lift')
-      reach.rotation.z = samplePose(frame, 'reach')
-      wrist.rotation.z = samplePose(frame, 'wrist')
+      robot.setAngles(angles)
+      if (explosion) robot.separate(explosion)
     },
-    setVisibility(hidden) {
-      for (const [id, object] of Object.entries(objects)) object.visible = !hidden.includes(id)
+    setExplosion(amount, reframe = false) {
+      dirty = true
+      explosion = amount
+      robot.separate(explosion)
+      if (reframe) view('perspective')
+    },
+    setVisibility(visible) {
+      for (const [id, object] of Object.entries(objects)) {
+        (linkVisuals[id] ?? object).visible = visible.has(id)
+      }
       updateSelection(selected)
     },
     setWireframe(enabled) {
@@ -257,6 +257,7 @@ export function createViewport(element, { onSelect, onChange, onOrbit }) {
     write(id, type, axis, value) {
       dirty = true
       objects[id][type][axis] = type === 'rotation' ? T.MathUtils.degToRad(value) : value
+      if (explosion) robot.separate(explosion)
       onChange()
     },
     reset(id) {
@@ -265,26 +266,23 @@ export function createViewport(element, { onSelect, onChange, onOrbit }) {
       for (const [key, object] of entries) {
         for (const type of ['position', 'rotation', 'scale']) object[type].copy(defaults[key][type])
       }
+      if (explosion) robot.separate(explosion)
       onChange()
     },
     async export() {
       const snapshot = plant.clone()
+      snapshot.userData.notice = modelNotice
+      for (const { node, components } of visuals) {
+        snapshot.getObjectByName(node.name).position.set(0, 0, 0)
+        for (const { node: part } of components) snapshot.getObjectByName(part.name).position.set(0, 0, 0)
+      }
       const { GLTFExporter } = await import('three/addons/exporters/GLTFExporter.js')
-      const end = keyframes.at(-1).frame
-      const times = Array.from({ length: end + 1 }, (_, frame) => frame / 30)
-      const orientation = new T.Quaternion()
-      const axis = new T.Vector3(0, 0, 1)
-      const tracks = [[lift, 'lift'], [reach, 'reach'], [wrist, 'wrist']].map(([pivot, channel]) => {
-        snapshot.getObjectByName(pivot.name).rotation.z = 0
-        const values = times.flatMap((_, frame) => orientation.setFromAxisAngle(axis, samplePose(frame, channel)).toArray())
-        return new T.QuaternionKeyframeTrack(pivot.name + '.quaternion', times, values)
-      })
-      const clip = new T.AnimationClip('Assembly cycle', end / 30, tracks)
+      const clip = makeMotionClip(pivots)
       const buffer = await new GLTFExporter().parseAsync(snapshot, { binary: true, onlyVisible: false, animations: [clip] })
       const url = URL.createObjectURL(new Blob([buffer], { type: 'model/gltf-binary' }))
       const link = document.createElement('a')
       link.href = url
-      link.download = 'assembly-cell.glb'
+      link.download = 'universal-robots-ur10e.glb'
       link.click()
       setTimeout(() => URL.revokeObjectURL(url), 1000)
     },
@@ -294,15 +292,19 @@ export function createViewport(element, { onSelect, onChange, onOrbit }) {
       orbit.dispose()
       gizmo.dispose()
       const materials = new Set()
+      const geometries = new Set(edges.values())
       scene.traverse((object) => {
-        object.geometry?.dispose()
-        if (object.material) materials.add(object.material)
+        if (object.geometry) geometries.add(object.geometry)
+        if (Array.isArray(object.material)) for (const material of object.material) materials.add(material)
+        else if (object.material) materials.add(object.material)
       })
+      for (const geometry of geometries) geometry.dispose()
       for (const material of materials) {
         material.map?.dispose()
         material.dispose()
       }
       outlineMaterial.dispose()
+      environment.dispose()
       for (const light of lights) light.shadow?.dispose()
       renderer.dispose()
       renderer.domElement.remove()
