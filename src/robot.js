@@ -37,15 +37,6 @@ export const keyframes = [
   { frame: 120, name: 'Return home', angles: [0, -70, 104, -60, 75, 15] },
 ]
 
-export function anglesAt(frame) {
-  const next = keyframes.findIndex((item) => item.frame > frame)
-  if (next === -1) return keyframes.at(-1).angles
-  const a = keyframes[next - 1]
-  const b = keyframes[next]
-  const progress = (frame - a.frame) / (b.frame - a.frame)
-  return a.angles.map((value, index) => T.MathUtils.lerp(value, b.angles[index], progress * progress * (3 - 2 * progress)))
-}
-
 function group(parent, name) {
   const object = new T.Group()
   object.name = name
@@ -126,6 +117,10 @@ export async function loadRobot() {
     parent = object
   }
   for (const [id, object] of Object.entries(objects)) object.userData.part = id
+  const flange = group(objects.wrist3, 'flange')
+  applyOrigin(flange, [identity, [0, -Math.PI / 2, -Math.PI / 2]])
+  const tool = group(flange, 'tool0')
+  applyOrigin(tool, [identity, [Math.PI / 2, 0, Math.PI / 2]])
 
   function setAngles(angles) {
     for (const [index, pivot] of pivots.entries()) {
@@ -149,17 +144,16 @@ export async function loadRobot() {
     }
   }
 
-  return { plant, objects, pivots, visuals, setAngles, separate }
+  return { plant, objects, pivots, visuals, tool, basis, setAngles, separate }
 }
 
-export function makeMotionClip(pivots) {
-  const end = keyframes.at(-1).frame
+export function makeMotionClip(pivots, name, end, sample) {
   const times = Array.from({ length: end + 1 }, (_, frame) => frame / 30)
-  const poses = times.map((_, frame) => anglesAt(frame))
+  const poses = times.map((_, frame) => sample(frame))
   const orientation = new T.Quaternion()
   const tracks = pivots.map((pivot, index) => {
     const values = poses.flatMap((angles) => orientation.setFromAxisAngle(axis, rad(angles[index])).toArray())
     return new T.QuaternionKeyframeTrack(pivot.name + '.quaternion', times, values)
   })
-  return new T.AnimationClip('UR10e motion preview', end / 30, tracks)
+  return new T.AnimationClip(name, end / 30, tracks)
 }

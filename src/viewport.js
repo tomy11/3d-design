@@ -2,19 +2,39 @@ import * as T from 'three'
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
 import { TransformControls } from 'three/addons/controls/TransformControls.js'
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js'
-import { anglesAt, loadRobot, makeMotionClip } from './robot'
+import { keyframes, loadRobot, makeMotionClip } from './robot'
+import { makeDrive } from './drive'
+import { loadGripper, makePickCell, pinchOffset } from './pick-cell'
 import modelNotice from '../public/models/ur10e-license.txt?raw'
+import gripperNotice from '../public/models/robotiq-license.txt?raw'
 
 const axes = ['x', 'y', 'z']
 const poses = { perspective: [2.05, 2.1, 6.1], top: [0, 1, 0.001], right: [1, 0, 0], front: [0, 0, 1] }
 
-export async function createViewport(element, { onSelect, onChange, onOrbit, signal }) {
-  const robot = await loadRobot()
+export async function createViewport(element, { onSelect, onSelectDrive, onChange, onOrbit, signal }) {
+  const [robot, gripper] = await Promise.all([loadRobot(), loadGripper()])
   signal.throwIfAborted()
   const { plant, objects, pivots, visuals } = robot
   const linkVisuals = Object.fromEntries(visuals.map(({ id, node }) => [id, node]))
   let explosion = 0
-  robot.setAngles(anglesAt(0))
+  let workspace = 'inspect'
+  let servicePart = null
+  let lastServiceJoint = -1
+  let showToolAxes = true
+  robot.setAngles(keyframes[0].angles)
+  const drive = makeDrive()
+  drive.attach(pivots[0], 0, 0)
+  drive.root.visible = false
+  const externalMeshes = new Map()
+  for (const { node } of visuals) node.traverse((child) => {
+    if (child.isMesh) externalMeshes.set(child, child.material)
+  })
+  const ghost = new T.MeshStandardMaterial({ color: '#90a6b7', transparent: true, opacity: 0.12, depthWrite: false })
+  const pickCell = makePickCell(robot, gripper)
+  const toolAxes = new T.AxesHelper(0.096)
+  toolAxes.name = 'Tool frame indicator'
+  robot.tool.add(toolAxes)
+  toolAxes.visible = false
   const scene = new T.Scene()
   scene.background = new T.Color('#21272e')
   scene.fog = new T.Fog('#21272e', 3.5, 10)
@@ -130,9 +150,10 @@ export async function createViewport(element, { onSelect, onChange, onOrbit, sig
     gizmo.detach()
     outline.clear()
     outlinedMeshes = []
+    if (workspace === 'service' || workspace === 'pick') return
     const object = objects[id]
     if (!object || !effectivelyVisible(linkVisuals[id] ?? object)) return
-    if (tool !== 'select') {
+    if (tool !== 'select' && workspace === 'inspect') {
       gizmo.setMode(tool)
       gizmo.attach(object)
     }
@@ -149,28 +170,67 @@ export async function createViewport(element, { onSelect, onChange, onOrbit, sig
   }
 
   function view(name) {
-    orbit.target.set(0.44 + 0.27 * explosion, 0.48 + 0.19 * explosion, -0.04)
     const direction = new T.Vector3(...poses[name]).normalize()
-    const distance = (1.91 + 0.60 * explosion) * Math.max(1, 1.14 / camera.aspect)
+    if (workspace === 'service') {
+      if (name === 'perspective') {
+        direction.set(0.8, -0.7, -0.7).applyQuaternion(drive.root.getWorldQuaternion(new T.Quaternion()))
+        direction.y = Math.abs(direction.y) + 0.25
+        direction.normalize()
+      }
+      frameObject(drive.root, direction, 4.05)
+      return
+    }
+    const isPick = workspace === 'pick'
+    if (isPick && name === 'perspective') direction.set(5.4, 3.6, 5.2).normalize()
+    orbit.target.set(isPick ? 0.46 : 0.44 + 0.27 * explosion, isPick ? 0.29 : 0.48 + 0.19 * explosion, isPick ? -0.13 : -0.04)
+    const distance = (isPick ? 2.15 : 1.91 + 0.60 * explosion) * Math.max(1, 1.14 / camera.aspect)
     camera.position.copy(orbit.target).addScaledVector(direction, distance)
     orbit.update()
   }
 
-  function focus() {
-    const object = linkVisuals[selected] ?? objects[selected]
+  function frameObject(object, direction, factor = 3.4) {
     if (!object || !effectivelyVisible(object)) return
     scene.updateMatrixWorld()
     const bounds = new T.Box3()
     object.traverse((node) => {
       if (!node.isMesh || !effectivelyVisible(node)) return
+      if (!node.geometry.boundingBox) node.geometry.computeBoundingBox()
       bounds.union(node.geometry.boundingBox.clone().applyMatrix4(node.matrixWorld))
     })
     if (bounds.isEmpty()) return
-    const direction = camera.position.clone().sub(orbit.target).normalize()
     const sphere = bounds.getBoundingSphere(new T.Sphere())
     orbit.target.copy(sphere.center)
-    camera.position.copy(sphere.center).addScaledVector(direction, Math.max(0.13, sphere.radius * 3.4 / Math.min(camera.aspect, 1)))
+    camera.position.copy(sphere.center).addScaledVector(direction, Math.max(0.13, sphere.radius * factor / Math.min(camera.aspect, 1)))
     orbit.update()
+  }
+
+  function focus() {
+    const target = workspace === 'service'
+      ? (drive.groups[servicePart] ?? drive.root)
+      : (linkVisuals[selected] ?? objects[selected])
+    const direction = camera.position.clone().sub(orbit.target).normalize()
+    frameObject(target, direction)
+  }
+
+  const toolMatrix = new T.Matrix4()
+  const baseInverse = new T.Matrix4()
+  const toolOffset = new T.Matrix4().makeTranslation(0, 0, pinchOffset)
+  const readPosition = new T.Vector3()
+  const readRotation = new T.Quaternion()
+  const readScale = new T.Vector3()
+  const readEuler = new T.Euler(0, 0, 0, 'ZYX')
+
+  function toolReadout() {
+    robot.tool.updateWorldMatrix(true, false)
+    baseInverse.copy(robot.basis.matrixWorld).invert()
+    toolMatrix.multiplyMatrices(baseInverse, robot.tool.matrixWorld)
+    if (workspace === 'pick') toolMatrix.multiply(toolOffset)
+    toolMatrix.decompose(readPosition, readRotation, readScale)
+    readEuler.setFromQuaternion(readRotation)
+    return {
+      position: readPosition.toArray().map((value) => value * 1000),
+      rotation: [readEuler.x, readEuler.y, readEuler.z].map(T.MathUtils.radToDeg),
+    }
   }
 
   function resize() {
@@ -201,6 +261,13 @@ export async function createViewport(element, { onSelect, onChange, onOrbit, sig
     const rect = renderer.domElement.getBoundingClientRect()
     const pointer = new T.Vector2((event.clientX - rect.left) / rect.width * 2 - 1, 1 - (event.clientY - rect.top) / rect.height * 2)
     raycaster.setFromCamera(pointer, camera)
+    if (workspace === 'pick') return
+    if (workspace === 'service') {
+      let object = raycaster.intersectObject(drive.root).find((hit) => effectivelyVisible(hit.object))?.object
+      while (object && !object.userData.drive) object = object.parent
+      if (object) onSelectDrive(object.userData.drive)
+      return
+    }
     const hit = raycaster.intersectObject(plant).find(({ object }) => effectivelyVisible(object))
     let object = hit?.object
     while (object && !object.userData.part) object = object.parent
@@ -222,9 +289,43 @@ export async function createViewport(element, { onSelect, onChange, onOrbit, sig
     select: updateSelection,
     view,
     focus,
-    setPose(angles) {
+    toolReadout,
+    setWorkspace(next) {
+      workspace = next
+      dirty = true
+      const servicing = next === 'service'
+      drive.root.visible = servicing
+      pickCell.setVisible(next === 'pick')
+      toolAxes.visible = showToolAxes && (next === 'teach' || next === 'pick')
+      toolAxes.position.z = next === 'pick' ? pinchOffset : 0
+      for (const [mesh, original] of externalMeshes) {
+        mesh.material = servicing ? ghost : original
+        mesh.castShadow = !servicing
+      }
+      updateSelection(selected)
+      if (!servicing) view('perspective')
+      else lastServiceJoint = -1
+    },
+    configureService(joint, separation, hidden, active) {
+      if (workspace !== 'service') return
+      dirty = true
+      servicePart = active
+      drive.attach(pivots[joint], joint, separation)
+      for (const [id, group] of Object.entries(drive.groups)) group.visible = !hidden.includes(id)
+      if (joint !== lastServiceJoint) {
+        view('perspective')
+        lastServiceJoint = joint
+      }
+    },
+    setToolAxes(visible) {
+      showToolAxes = visible
+      toolAxes.visible = visible && (workspace === 'teach' || workspace === 'pick')
+      dirty = true
+    },
+    setPose(angles, frame) {
       dirty = true
       robot.setAngles(angles)
+      if (workspace === 'pick') pickCell.update(frame)
       if (explosion) robot.separate(explosion)
     },
     setExplosion(amount, reframe = false) {
@@ -269,29 +370,42 @@ export async function createViewport(element, { onSelect, onChange, onOrbit, sig
       if (explosion) robot.separate(explosion)
       onChange()
     },
-    async export() {
-      const snapshot = plant.clone()
-      snapshot.userData.notice = modelNotice
+    async export({ service, pick, clipName, duration, sample }) {
+      const { GLTFExporter } = await import('three/addons/exporters/GLTFExporter.js')
+      const snapshot = service ? drive.root.clone() : plant.clone()
+      const exporter = new GLTFExporter()
+      if (service) {
+        snapshot.scale.setScalar(1)
+        for (const group of snapshot.children) group.position.set(0, 0, 0)
+        const file = await exporter.parseAsync(snapshot, { binary: true, onlyVisible: false })
+        download(file, 'concept-joint-drive.glb')
+        return
+      }
+      const excluded = [drive.root.name, toolAxes.name]
+      if (!pick) excluded.push(pickCell.stations.name, pickCell.gripper.name)
+      for (const name of excluded) {
+        snapshot.getObjectByName(name)?.removeFromParent()
+      }
+      snapshot.userData.notice = pick ? modelNotice + '\n' + gripperNotice : modelNotice
       for (const { node, components } of visuals) {
         snapshot.getObjectByName(node.name).position.set(0, 0, 0)
         for (const { node: part } of components) snapshot.getObjectByName(part.name).position.set(0, 0, 0)
       }
-      const { GLTFExporter } = await import('three/addons/exporters/GLTFExporter.js')
-      const clip = makeMotionClip(pivots)
-      const buffer = await new GLTFExporter().parseAsync(snapshot, { binary: true, onlyVisible: false, animations: [clip] })
-      const url = URL.createObjectURL(new Blob([buffer], { type: 'model/gltf-binary' }))
-      const link = document.createElement('a')
-      link.href = url
-      link.download = 'universal-robots-ur10e.glb'
-      link.click()
-      setTimeout(() => URL.revokeObjectURL(url), 1000)
+      const animations = duration > 0 ? [makeMotionClip(pivots, clipName, duration, sample)] : []
+      if (pick) {
+        animations[0].tracks.push(...pickCell.motionTracks(duration, sample))
+        animations[0].resetDuration()
+      }
+      const buffer = await exporter.parseAsync(snapshot, { binary: true, onlyVisible: false, animations })
+      download(buffer, pick ? 'ur10e-pick-and-place.glb' : 'universal-robots-ur10e.glb')
     },
     dispose() {
       renderer.setAnimationLoop(null)
       observer.disconnect()
       orbit.dispose()
       gizmo.dispose()
-      const materials = new Set()
+      const materials = new Set([ghost])
+      for (const value of externalMeshes.values()) for (const material of [value].flat()) materials.add(material)
       const geometries = new Set(edges.values())
       scene.traverse((object) => {
         if (object.geometry) geometries.add(object.geometry)
@@ -310,4 +424,13 @@ export async function createViewport(element, { onSelect, onChange, onOrbit, sig
       renderer.domElement.remove()
     },
   }
+}
+
+function download(buffer, name) {
+  const url = URL.createObjectURL(new Blob([buffer], { type: 'model/gltf-binary' }))
+  const link = document.createElement('a')
+  link.href = url
+  link.download = name
+  link.click()
+  setTimeout(() => URL.revokeObjectURL(url), 1000)
 }

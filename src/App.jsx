@@ -2,10 +2,13 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   Box, Boxes, ChevronDown, ChevronRight, CircleHelp, Download, Eye, EyeOff,
   Focus, Grid2X2, Layers3, Expand, Maximize, MousePointer2, Move, Pause, Play, RotateCcw,
-  RotateCw, ScanLine, SkipBack, SkipForward, SlidersHorizontal, X,
+  RotateCw, ScanLine, SkipBack, SkipForward, SlidersHorizontal, Wrench, X,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
-import { anglesAt, hierarchy, joints, keyframes, licenseUrl, meshCount, sourceUrl } from './robot'
+import { hierarchy, joints, keyframes, licenseUrl, meshCount, sourceUrl } from './robot'
+import { fps, persistTaughtProgram, pickProgram, readTaughtProgram, sampleProgram, teachEnd } from './program'
+import { PickPanel, ServiceFooter, ServicePanels, TeachPanels, ToolFrame } from './ModePanels'
+import { gripperLicense, gripperSource } from './pick-cell'
 import { createViewport } from './viewport'
 
 const tools = [
@@ -16,8 +19,12 @@ const tools = [
 ]
 const toolKeys = Object.fromEntries(tools.map((tool) => [tool.key.toLowerCase(), tool.id]))
 const viewLabels = { perspective: 'Perspective', orbit: 'Perspective', top: 'Top', front: 'Front', right: 'Right' }
-const fps = 30
-const lastFrame = keyframes.at(-1).frame
+const modes = [
+  { id: 'inspect', label: 'Inspect', icon: Layers3 },
+  { id: 'teach', label: 'Teach Mode', icon: ScanLine },
+  { id: 'pick', label: 'Pick & Place', icon: Box },
+  { id: 'service', label: 'Service Mode', icon: Wrench },
+]
 
 function indexTree(nodes, parents = []) {
   const entries = nodes.flatMap((node) => [
@@ -145,7 +152,7 @@ function Inspector({ selected, transform, viewport, pose, setJoint, isolated, se
   )
 }
 
-function Timeline({ frame, playing, setFrame, setPlaying }) {
+function Timeline({ frame, playing, setFrame, setPlaying, lastFrame, markers, trackName, canPlay }) {
   const track = useRef(null)
   function seek(event) {
     const rect = track.current.getBoundingClientRect()
@@ -157,15 +164,15 @@ function Timeline({ frame, playing, setFrame, setPlaying }) {
         <div className="panel-heading"><ScanLine size={16} /><h2>Timeline</h2></div>
         <div className="playback">
           <IconButton label="First frame" onClick={() => { setPlaying(false); setFrame(0) }}><SkipBack size={14} /></IconButton>
-          <IconButton label={playing ? 'Pause joint motion' : 'Play joint motion'} className="mini-play" onClick={() => setPlaying(!playing)}>{playing ? <Pause size={15} fill="currentColor" /> : <Play size={15} fill="currentColor" />}</IconButton>
+          <IconButton label={playing ? 'Pause joint motion' : 'Play joint motion'} className="mini-play" disabled={!canPlay} onClick={() => setPlaying(!playing)}>{playing ? <Pause size={15} fill="currentColor" /> : <Play size={15} fill="currentColor" />}</IconButton>
           <IconButton label="Last frame" onClick={() => { setPlaying(false); setFrame(lastFrame) }}><SkipForward size={14} /></IconButton>
         </div>
         <div className="frame-count"><strong>{String(frame).padStart(3, '0')}</strong> / {lastFrame}<span>{fps} FPS</span></div>
       </div>
       <div className="timeline-content">
-        <span className="track-label">Joint motion</span>
-        <div className="ruler" ref={track}>
-          <div className="ruler-scrub" role="slider" tabIndex={0} aria-label="Animation frame" aria-valuemin={0} aria-valuemax={lastFrame} aria-valuenow={frame}
+        <span className="track-label">{trackName}</span>
+        <div className={`ruler ${markers.length > 6 ? 'dense-ruler' : ''}`} ref={track}>
+          <div className="ruler-scrub" role="slider" tabIndex={0} aria-label="Animation frame" aria-valuemin={0} aria-valuemax={lastFrame} aria-valuenow={frame} aria-valuetext={`Frame ${frame}`}
             onPointerDown={(event) => {
               event.currentTarget.setPointerCapture(event.pointerId)
               setPlaying(false)
@@ -180,7 +187,7 @@ function Timeline({ frame, playing, setFrame, setPlaying }) {
               setFrame(Math.max(0, Math.min(lastFrame, changes[event.key])))
             }}
           />
-          {keyframes.map((item) => (
+          {markers.map((item) => (
             <div key={item.frame} className="keyframe" style={{ left: `${item.frame / lastFrame * 100}%` }}>
               <span>{item.frame}</span>
               <button aria-label={`${item.name}, frame ${item.frame}`} title={item.name} onClick={() => { setPlaying(false); setFrame(item.frame) }}><i /></button>
@@ -201,6 +208,15 @@ export default function App() {
   const [expanded, setExpanded] = useState(['robot'])
   const [hidden, setHidden] = useState([])
   const [isolated, setIsolated] = useState(null)
+  const [workspace, setWorkspace] = useState('inspect')
+  const [taught, setTaught] = useState(readTaughtProgram)
+  const [toolValues, setToolValues] = useState(null)
+  const [showAxes, setShowAxes] = useState(true)
+  const [servicePose, setServicePose] = useState(keyframes[0].angles)
+  const [serviceJoint, setServiceJoint] = useState(1)
+  const [servicePart, setServicePart] = useState(null)
+  const [serviceHidden, setServiceHidden] = useState([])
+  const [separation, setSeparation] = useState(0.62)
   const [explosion, setExplosion] = useState(0)
   const [overrides, setOverrides] = useState({})
   const [ready, setReady] = useState(false)
@@ -217,7 +233,41 @@ export default function App() {
   const [error, setError] = useState(false)
   const frameRef = useRef(0)
   const cameraMoved = useRef(false)
-  const pose = useMemo(() => anglesAt(frame).map((angle, index) => overrides[index] ?? angle), [frame, overrides])
+  const program = workspace === 'teach' ? taught : workspace === 'pick' ? pickProgram : keyframes
+  const lastFrame = workspace === 'teach' ? teachEnd : program.at(-1).frame
+  const canPlay = ready && workspace !== 'service' && (workspace !== 'teach' || taught.length > 1)
+  const pose = useMemo(() => {
+    if (workspace === 'service') return servicePose
+    return sampleProgram(program, frame).map((angle, index) => overrides[index] ?? angle)
+  }, [workspace, servicePose, program, frame, overrides])
+
+  function switchWorkspace(next) {
+    if (next === workspace) return
+    if (next === 'service') setServicePose(pose)
+    setPlaying(false)
+    setFrame(0)
+    setOverrides({})
+    setTool('select')
+    setView('perspective')
+    setWorkspace(next)
+    cameraMoved.current = false
+  }
+
+  function savePose() {
+    setPlaying(false)
+    const entry = { frame, angles: [...pose] }
+    const next = [...taught.filter((key) => key.frame !== frame), entry].sort((a, b) => a.frame - b.frame)
+    setTaught(next)
+    setOverrides({})
+    setNotice(persistTaughtProgram(next) ? `Pose saved at frame ${frame}.` : 'Pose saved for this session. Browser storage is unavailable.')
+  }
+
+  function deletePose(at) {
+    if (taught.length <= 2) setPlaying(false)
+    const next = taught.filter((key) => key.frame !== at)
+    setTaught(next)
+    if (!persistTaughtProgram(next)) setNotice('Browser storage is unavailable.')
+  }
 
   function seek(next) {
     setOverrides({})
@@ -230,7 +280,7 @@ export default function App() {
   }
 
   function togglePlayback() {
-    if (!ready) return
+    if (!canPlay) return
     if (!playing) setOverrides({})
     setPlaying(!playing)
   }
@@ -251,6 +301,7 @@ export default function App() {
     createViewport(mount.current, {
       signal: controller.signal,
       onSelect: choose,
+      onSelectDrive: setServicePart,
       onChange: () => setTransformVersion((version) => version + 1),
       onOrbit: () => { cameraMoved.current = true; setView('orbit') },
     }).then((api) => {
@@ -272,32 +323,52 @@ export default function App() {
     }
   }, [])
 
-  useEffect(() => { viewport.current?.select(selected, tool) }, [ready, selected, tool])
-  useEffect(() => { viewport.current?.setVisibility(visible) }, [ready, visible])
-  useEffect(() => { viewport.current?.setWireframe(wireframe) }, [ready, wireframe])
-  useEffect(() => { viewport.current?.setGrid(grid) }, [ready, grid])
   useEffect(() => {
-    viewport.current?.setPose(pose)
+    const api = viewport.current
+    if (!api) return
+    api.setExplosion(0)
+    api.setWorkspace(workspace)
+  }, [ready, workspace])
+
+  useEffect(() => { viewport.current?.select(selected, tool) }, [ready, selected, tool])
+  useEffect(() => {
+    viewport.current?.setVisibility(workspace === 'pick' || workspace === 'service' ? visibleParts([], null) : visible)
+  }, [ready, visible, workspace])
+  useEffect(() => { viewport.current?.setWireframe(wireframe && workspace !== 'service') }, [ready, wireframe, workspace])
+  useEffect(() => { viewport.current?.setGrid(grid) }, [ready, grid])
+  useEffect(() => { viewport.current?.setToolAxes(showAxes) }, [ready, showAxes])
+  useEffect(() => {
+    if (workspace === 'inspect' && explosion > 0) viewport.current?.setExplosion(explosion, !cameraMoved.current)
+  }, [ready, workspace])
+  useEffect(() => {
+    const api = viewport.current
+    if (api) {
+      api.setPose(pose, frame)
+      if (workspace === 'teach' || workspace === 'pick') setToolValues(api.toolReadout())
+    }
     frameRef.current = frame
-  }, [ready, frame, pose])
+  }, [ready, frame, pose, workspace])
+  useEffect(() => {
+    viewport.current?.configureService(serviceJoint, separation, serviceHidden, servicePart)
+  }, [ready, workspace, serviceJoint, separation, serviceHidden, servicePart])
 
   useEffect(() => {
     if (!playing) return
-    const start = performance.now() - (frameRef.current % lastFrame) / fps * 1000
+    const start = performance.now() - (frameRef.current % (lastFrame + 1)) / fps * 1000
     let request
     function tick(now) {
-      setFrame(Math.floor((now - start) / 1000 * fps) % lastFrame)
+      setFrame(Math.max(0, Math.floor((now - start) / 1000 * fps)) % (lastFrame + 1))
       request = requestAnimationFrame(tick)
     }
     request = requestAnimationFrame(tick)
     return () => cancelAnimationFrame(request)
-  }, [playing])
+  }, [playing, lastFrame])
 
   useEffect(() => {
     function shortcut(event) {
       if (dialog.current?.open || event.altKey || event.metaKey || event.ctrlKey || event.target.closest('input, select, [role="slider"]')) return
       const key = event.key.toLowerCase()
-      if (key in toolKeys) setTool(toolKeys[key])
+      if (workspace === 'inspect' && key in toolKeys) setTool(toolKeys[key])
       if (key === 'f') { cameraMoved.current = true; viewport.current?.focus(); setView('orbit') }
       if (key === 'escape') choose(null)
       if (key === ' ' && !event.target.closest('button')) {
@@ -307,7 +378,7 @@ export default function App() {
     }
     window.addEventListener('keydown', shortcut)
     return () => window.removeEventListener('keydown', shortcut)
-  }, [ready, playing])
+  }, [canPlay, playing, workspace])
 
   useEffect(() => {
     if (!notice) return
@@ -326,8 +397,14 @@ export default function App() {
     setExporting(true)
     setNotice('')
     try {
-      await viewport.current.export()
-      setNotice('UR10e exported as GLB.')
+      await viewport.current.export({
+        service: workspace === 'service',
+        pick: workspace === 'pick',
+        clipName: workspace === 'teach' ? 'Taught UR10e motion' : workspace === 'pick' ? 'UR10e pick and place' : 'UR10e motion preview',
+        duration: workspace === 'teach' && taught.length < 2 ? 0 : lastFrame,
+        sample: (at) => sampleProgram(program, at),
+      })
+      setNotice(workspace === 'service' ? 'Concept joint drive exported as GLB.' : 'UR10e exported as GLB.')
     } catch (failure) {
       console.error(failure)
       setNotice('The GLB export failed. Please try again.')
@@ -363,11 +440,15 @@ export default function App() {
             <h1>UR10e Collaborative Robot</h1>
             <p className="spec-line"><span>6 rotary axes</span><i /><span>1,300 mm reach</span><i /><span>{meshCount} CAD parts</span></p>
           </div>
-          <Button className="primary-play" onClick={togglePlayback} disabled={!ready}>
+          {workspace !== 'service' && <Button className="primary-play" onClick={togglePlayback} disabled={!canPlay}>
             {playing ? <Pause size={17} fill="currentColor" /> : <Play size={17} fill="currentColor" />}
             {playing ? 'Pause motion' : 'Play motion'}
-          </Button>
+          </Button>}
         </div>
+
+        <nav className="mode-nav" aria-label="Workbench modes">
+          {modes.map(({ id, label, icon: Icon }) => <Button key={id} variant="ghost" aria-pressed={workspace === id} onClick={() => switchWorkspace(id)}><Icon size={16} />{label}</Button>)}
+        </nav>
 
         <div className="workbench">
           <div className="workbench-main">
@@ -375,10 +456,10 @@ export default function App() {
               <div className="viewport-header">
                 <div className="viewport-title"><Box size={16} /><h2>3D Viewport</h2></div>
                 <div className="viewport-actions">
-                  <Button className="explode-button" size="sm" variant="ghost" aria-pressed={explosion > 0} disabled={!ready} onClick={() => changeExplosion(explosion > 0 ? 0 : 1, !cameraMoved.current)}><Expand size={15} /> Explode</Button>
+                  {workspace === 'inspect' && <Button className="explode-button" size="sm" variant="ghost" aria-pressed={explosion > 0} disabled={!ready} onClick={() => changeExplosion(explosion > 0 ? 0 : 1, !cameraMoved.current)}><Expand size={15} /> Explode</Button>}
                   <span className="vertical-rule" />
                   <IconButton label={grid ? 'Hide grid' : 'Show grid'} aria-pressed={grid} onClick={() => setGrid(!grid)}><Grid2X2 size={16} /></IconButton>
-                  <IconButton label={wireframe ? 'Switch to solid view' : 'Switch to wireframe'} aria-pressed={wireframe} onClick={() => setWireframe(!wireframe)}><Layers3 size={17} /></IconButton>
+                  {workspace === 'inspect' && <IconButton label={wireframe ? 'Switch to solid view' : 'Switch to wireframe'} aria-pressed={wireframe} onClick={() => setWireframe(!wireframe)}><Layers3 size={17} /></IconButton>}
                   <span className="vertical-rule" />
                   <IconButton label="Reset view" onClick={() => changeView('perspective')}><RotateCcw size={16} /></IconButton>
                 </div>
@@ -386,17 +467,17 @@ export default function App() {
               <div className="render-area">
                 <div className="canvas-mount" ref={mount} />
                 {!ready && <div className="render-error" role="status">{error ? 'The UR10e model could not load. Reload the page in a browser with WebGL 2 enabled.' : 'Loading UR10e CAD…'}</div>}
-                {explosion > 0 && <label className="explosion-slider">Separation <input type="range" aria-label="Part separation" min="0.05" max="1" step="0.01" value={explosion} onChange={(event) => changeExplosion(Number(event.target.value))} /></label>}
-                {isolated && <button className="isolation-chip" onClick={() => setIsolated(null)}><Focus size={13} /> {parts[isolated].name} isolated <X size={13} /></button>}
+                {workspace === 'inspect' && explosion > 0 && <label className="explosion-slider">Separation <input type="range" aria-label="Part separation" min="0.05" max="1" step="0.01" value={explosion} onChange={(event) => changeExplosion(Number(event.target.value))} /></label>}
+                {(workspace === 'inspect' || workspace === 'teach') && isolated && <button className="isolation-chip" onClick={() => setIsolated(null)}><Focus size={13} /> {parts[isolated].name} isolated <X size={13} /></button>}
                 <div className="viewport-overlay">
-                  <span className="view-label">{viewLabels[view]} <i /> {wireframe ? 'Wireframe' : 'Solid'}</span>
-                  <div className="tool-dock" aria-label="Transform tools">
+                  <span className="view-label">{viewLabels[view]} <i /> {workspace === 'service' ? 'Cutaway' : workspace === 'inspect' && wireframe ? 'Wireframe' : 'Solid'}</span>
+                  {workspace === 'inspect' && <div className="tool-dock" aria-label="Transform tools">
                     {tools.map(({ id, icon: Icon, label, key }) =>
                       <IconButton key={id} label={`${label} (${key})`} aria-pressed={tool === id} onClick={() => setTool(id)}><Icon size={17} /></IconButton>
                     )}
                     <span className="dock-rule" />
                     <IconButton label="Focus selected (F)" disabled={!ready || !selected} onClick={() => { cameraMoved.current = true; viewport.current?.focus(); setView('orbit') }}><Focus size={17} /></IconButton>
-                  </div>
+                  </div>}
                 </div>
                 <div className="orientation" aria-label="Camera views">
                   <svg viewBox="0 0 84 76" aria-hidden="true"><path d="M40 40V15 M40 40L69 49 M40 40L17 61" /><circle cx="40" cy="40" r="3" /></svg>
@@ -406,14 +487,24 @@ export default function App() {
                 </div>
                 <div className="viewport-hints mouse-hints"><span>Drag <b>Orbit</b></span><i /><span>Scroll <b>Zoom</b></span><i /><span>Right drag <b>Pan</b></span></div>
                 <div className="viewport-hints touch-hints"><span>Drag <b>Orbit</b></span><i /><span>Pinch <b>Zoom</b></span><i /><span>2 fingers <b>Pan</b></span></div>
-                <div className="view-stage"><i /> {error ? 'VIEW UNAVAILABLE' : playing ? 'MOTION RUNNING' : ready ? 'MODEL READY' : 'LOADING CAD'}</div>
+                <div className="view-stage"><i /> {error ? 'VIEW UNAVAILABLE' : playing ? 'MOTION RUNNING' : !ready ? 'LOADING CAD' : workspace === 'service' ? 'CONCEPT DRIVE' : 'MODEL READY'}</div>
               </div>
             </section>
 
-            <Timeline frame={frame} playing={playing} setFrame={seek} setPlaying={(value) => value ? togglePlayback() : setPlaying(false)} />
+            {workspace === 'service' ? <ServiceFooter joint={serviceJoint} /> : <Timeline frame={frame} playing={playing} setFrame={seek}
+              setPlaying={(value) => value ? togglePlayback() : setPlaying(false)} lastFrame={lastFrame} canPlay={canPlay}
+              trackName={workspace === 'teach' ? 'Taught poses' : workspace === 'pick' ? 'Pick & place' : 'Joint motion'}
+              markers={workspace === 'teach' ? taught.map((key) => ({ ...key, name: 'Saved pose' })) : program}
+            />}
           </div>
 
           <aside className="sidebar">
+            {(workspace === 'teach' || workspace === 'pick') && <ToolFrame values={toolValues} axes={showAxes} setAxes={setShowAxes} pick={workspace === 'pick'} />}
+            {workspace === 'teach' && <TeachPanels {...{ pose, setJoint, frame, ready }} keys={taught} onSeek={(at) => { setPlaying(false); seek(at) }} onSave={savePose} onDelete={deletePose} />}
+            {workspace === 'pick' && <PickPanel frame={frame} seek={(at) => { setPlaying(false); seek(at) }} />}
+            {workspace === 'service' && <ServicePanels joint={serviceJoint} setJoint={setServiceJoint} separation={separation} setSeparation={setSeparation}
+              selected={servicePart} changeSelected={setServicePart} hidden={serviceHidden} toggleHidden={(id) => toggle(setServiceHidden, id)} />}
+            {workspace === 'inspect' && <>
             <section className="panel hierarchy">
               <div className="panel-heading"><Layers3 size={17} /><h2>Scene Hierarchy</h2><span className="object-count">{meshCount} parts</span></div>
               <div className="tree-scroll">
@@ -422,6 +513,7 @@ export default function App() {
               </div>
             </section>
             <Inspector {...{ selected, transform, viewport, pose, setJoint, isolated, setIsolated }} onSelect={choose} />
+            </>}
           </aside>
         </div>
 
@@ -442,6 +534,7 @@ export default function App() {
             <div><dt>Play or pause motion</dt><dd><kbd>Space</kbd></dd></div>
           </dl>
           <p className="model-credit">UR10e external meshes and nominal joint frames from <a href={sourceUrl} target="_blank" rel="noreferrer">Universal Robots’ ROS 2 description</a>. <a href={licenseUrl} target="_blank" rel="noreferrer">BSD 3-Clause notice</a>.</p>
+          <p className="model-credit">Hand-E visual meshes from <a href={gripperSource} target="_blank" rel="noreferrer">Robotiq’s ROS 2 description</a>. <a href={gripperLicense} target="_blank" rel="noreferrer">BSD 3-Clause notice</a>.</p>
         </div>
       </dialog>
       {notice && <div className="toast" role="status">{notice}</div>}
