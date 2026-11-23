@@ -39,8 +39,16 @@ export async function loadMesh(file) {
   const parts = []
   root.traverse((node) => {
     if (!node.isMesh || !node.geometry?.attributes.position) return
+    // Copy to plain floats: compressed files store positions as normalized or interleaved integers.
+    const source = node.geometry.attributes.position
+    const positions = new Float32Array(source.count * 3)
+    for (let index = 0; index < source.count; index++) {
+      positions[index * 3] = source.getX(index)
+      positions[index * 3 + 1] = source.getY(index)
+      positions[index * 3 + 2] = source.getZ(index)
+    }
     let geometry = new T.BufferGeometry()
-    geometry.setAttribute('position', node.geometry.attributes.position.clone())
+    geometry.setAttribute('position', new T.BufferAttribute(positions, 3))
     if (node.geometry.index) geometry.setIndex(node.geometry.index.clone())
     geometry = geometry.index ? geometry.toNonIndexed() : geometry
     geometry.applyMatrix4(node.matrixWorld)

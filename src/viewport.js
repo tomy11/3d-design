@@ -125,6 +125,16 @@ export async function createViewport(element, { onSelect, onSelectDrive, onChang
   reference.visible = false
   let referenceWanted = false
   scene.add(reference)
+  // Solid on its own; see-through once there is a traced solid to compare it with.
+  function referenceLook() {
+    const ghost = Boolean(adapter.geometry.attributes.position?.count)
+    const material = reference.material
+    if (material.transparent === ghost) return
+    material.transparent = ghost
+    material.opacity = ghost ? 0.34 : 1
+    material.depthWrite = !ghost
+    material.needsUpdate = true
+  }
   let gridEnabled = true
   let fittingAdapter = true
   let measuring = false
@@ -424,6 +434,7 @@ export async function createViewport(element, { onSelect, onSelectDrive, onChang
         fittingAdapter = true
       }
       referenceWanted = Boolean(geometry ?? reference.geometry.attributes.position) && visible
+      referenceLook()
       reference.visible = referenceWanted && workspace === 'cad'
       if (reference.visible && fittingAdapter && !adapter.geometry.attributes.position?.count) {
         view('perspective')
@@ -443,6 +454,7 @@ export async function createViewport(element, { onSelect, onSelectDrive, onChang
       geometry.computeBoundingSphere()
       adapter.geometry.dispose()
       adapter.geometry = geometry
+      referenceLook()
       if (workspace === 'cad' && fittingAdapter) view('perspective')
       fittingAdapter = false
       dirty = true
