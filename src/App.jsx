@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   Box, Boxes, ChevronDown, ChevronRight, CircleHelp, Download, Eye, EyeOff,
-  Focus, FolderOpen, Magnet, Redo2, Ruler, Save, Scissors, Undo2, Grid2X2, Layers3, Expand, Maximize, MousePointer2, Move, Pause, Play, RotateCcw,
+  Focus, Maximize2, Minimize2, PanelRight, PanelBottom, FolderOpen, Magnet, Redo2, Ruler, Save, Scissors, Undo2, Grid2X2, Layers3, Expand, Maximize, MousePointer2, Move, Pause, Play, RotateCcw,
   RotateCw, ScanLine, SkipBack, SkipForward, SlidersHorizontal, Wrench, X,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
@@ -21,13 +21,17 @@ const tools = [
   { id: 'rotate', icon: RotateCw, label: 'Rotate', key: 'R' },
   { id: 'scale', icon: Maximize, label: 'Scale', key: 'S' },
 ]
+const sidebarMin = 280
+const sidebarMax = 480
+const clampSidebar = (width) => Math.max(sidebarMin, Math.min(sidebarMax, width))
+
 const toolKeys = Object.fromEntries(tools.map((tool) => [tool.key.toLowerCase(), tool.id]))
 const viewLabels = { perspective: 'Perspective', orbit: 'Perspective', top: 'Top', front: 'Front', right: 'Right' }
 const modes = [
   { id: 'inspect', label: 'Inspect', icon: Layers3 },
-  { id: 'teach', label: 'Teach Mode', icon: ScanLine },
+  { id: 'teach', label: 'Teach Mode', compact: 'Teach', icon: ScanLine },
   { id: 'pick', label: 'Pick & Place', icon: Box },
-  { id: 'service', label: 'Service Mode', icon: Wrench },
+  { id: 'service', label: 'Service Mode', compact: 'Service', icon: Wrench },
   { id: 'cad', label: 'CAD', icon: SlidersHorizontal },
 ]
 
@@ -207,6 +211,12 @@ function Timeline({ frame, playing, setFrame, setPlaying, lastFrame, markers, tr
 
 export default function App() {
   const mount = useRef(null)
+  const splitterDrag = useRef(null)
+  const [sidebarWidth, setSidebarWidth] = useState(330)
+  const [dock, setDock] = useState(true)
+  const [timeline, setTimeline] = useState(true)
+  const [focused, setFocused] = useState(false)
+  const [fullscreen, setFullscreen] = useState(false)
   const viewport = useRef(null)
   const dialog = useRef(null)
   const fileInput = useRef(null)
@@ -370,8 +380,63 @@ export default function App() {
     }
   }
 
+  function showInspector() {
+    setFocused(false)
+    setDock(true)
+  }
+
+  function resizeDock(event) {
+    const start = splitterDrag.current
+    if (!start || !event.currentTarget.hasPointerCapture(event.pointerId)) return
+    setSidebarWidth(clampSidebar(start.width + start.x - event.clientX))
+  }
+
+  useEffect(() => {
+    if (desktop) {
+      let active = true
+      async function syncNative() {
+        try {
+          const { getCurrentWindow } = await import('@tauri-apps/api/window')
+          const value = await getCurrentWindow().isFullscreen()
+          if (active) setFullscreen(value)
+        } catch {
+          // The viewport focus control remains available in older desktop builds.
+        }
+      }
+      syncNative()
+      window.addEventListener('resize', syncNative)
+      return () => { active = false; window.removeEventListener('resize', syncNative) }
+    }
+    function syncBrowser() {
+      setFullscreen(Boolean(document.fullscreenElement))
+    }
+    document.addEventListener('fullscreenchange', syncBrowser)
+    return () => document.removeEventListener('fullscreenchange', syncBrowser)
+  }, [])
+
+  async function toggleFullscreen() {
+    try {
+      if (desktop) {
+        const { getCurrentWindow } = await import('@tauri-apps/api/window')
+        const window = getCurrentWindow()
+        const next = !(await window.isFullscreen())
+        await window.setFullscreen(next)
+        setFullscreen(next)
+      } else if (document.fullscreenElement) {
+        await document.exitFullscreen()
+      } else if (document.fullscreenEnabled && document.documentElement.requestFullscreen) {
+        await document.documentElement.requestFullscreen()
+      } else {
+        setFocused((current) => !current)
+      }
+    } catch {
+      setFocused((current) => !current)
+    }
+  }
+
   function switchWorkspace(next) {
     if (next === workspace) return
+    if (next !== 'inspect') showInspector()
     if (next === 'service') setServicePose(pose)
     setMeasure(false)
     setPlaying(false)
@@ -534,7 +599,15 @@ export default function App() {
       }
       if (workspace === 'inspect' && key in toolKeys) setTool(toolKeys[key])
       if (key === 'f') { cameraMoved.current = true; viewport.current?.focus(); setView('orbit') }
-      if (key === 'escape') choose(null)
+      if (key === 'escape') {
+        if (focused) setFocused(false)
+        else choose(null)
+      }
+      if (key === ' ' && event.shiftKey) {
+        event.preventDefault()
+        setFocused((active) => !active)
+        return
+      }
       if (key === ' ' && !event.target.closest('button')) {
         event.preventDefault()
         togglePlayback()
@@ -583,14 +656,23 @@ export default function App() {
 
   const transform = ready ? viewport.current?.read(selected) : null
   const showViewportPanel = measure || section.enabled
+  const inspectorVisible = dock && !focused
+  const hasTimeline = workspace !== 'cad' && workspace !== 'service'
+  const lowerDockVisible = !focused && (hasTimeline ? timeline : workspace === 'service')
+  const isCad = workspace === 'cad'
+  const currentPart = selected ? parts[selected]?.name : null
+  const stateLabel = error ? 'Viewport unavailable' : !ready ? 'Loading model' : cadBuilding && isCad ? 'Building solid' : playing ? 'Playing' : 'Ready'
 
   return (
-    <div className="app">
+    <div className={`app ${focused ? 'viewport-focused' : ''}`}>
       <header className="topbar">
         <div className="topbar-inner">
           <div className="identity"><span className="brand-icon"><Boxes size={22} strokeWidth={1.8} /></span><span>Assembly<span className="brand-accent">.</span>Lab</span></div>
           <div className="header-divider" />
-          <span className="header-context">{desktop ? 'DESKTOP WORKBENCH' : '3D WORKBENCH'}</span>
+          <div className="document-title">
+            <span className="document-type">{isCad ? 'PART DESIGN' : 'ROBOT WORKCELL'}</span>
+            <h1>{isCad ? 'Flange Adapter Workbench' : 'UR10e Collaborative Robot'}</h1>
+          </div>
           <div className="header-actions">
             <input ref={fileInput} type="file" hidden accept=".assemblylab,application/json" onChange={(event) => {
               const file = event.target.files[0]
@@ -599,49 +681,58 @@ export default function App() {
             }} />
             <IconButton label="Open project" disabled={!ready || projectBusy} onClick={() => openProject()}><FolderOpen size={17} /></IconButton>
             <IconButton label="Save project" disabled={!ready || projectBusy} onClick={writeProject}><Save size={17} /></IconButton>
-            <Button variant="ghost" aria-label="Controls" onClick={() => dialog.current.showModal()} className="help-button"><CircleHelp size={17} /><span>Controls</span></Button>
+            <span className="header-divider action-divider" />
+            <IconButton label="Controls" onClick={() => dialog.current.showModal()}><CircleHelp size={17} /></IconButton>
+            <IconButton label={fullscreen ? 'Exit fullscreen' : 'Enter fullscreen'} aria-pressed={fullscreen} onClick={toggleFullscreen}>
+              {fullscreen ? <Minimize2 size={16} /> : <Maximize2 size={16} />}
+            </IconButton>
             <Button variant="outline" aria-label={workspace === 'cad' ? 'Export STEP' : 'Export GLB'} onClick={workspace === 'cad' ? exportAdapter : exportScene} disabled={!ready || exporting || (workspace === 'cad' && (cadBuilding || stepExporting || Boolean(cadError)))} className="export-button"><Download size={16} /><span>{exporting || stepExporting ? 'Exporting…' : workspace === 'cad' ? 'Export STEP' : 'Export GLB'}</span></Button>
           </div>
         </div>
       </header>
 
       <main className="workspace">
-        <div className="scene-intro">
-          <div>
-            <div className="eyebrow"><span /> {workspace === 'cad' ? 'PART DESIGN / FLANGE ADAPTER' : 'UNIVERSAL ROBOTS / E-SERIES'}</div>
-            <h1>{workspace === 'cad' ? 'Flange Adapter Workbench' : 'UR10e Collaborative Robot'}</h1>
-            {workspace === 'cad'
-              ? <p className="spec-line"><span>Parametric solid</span><i /><span>Millimetres</span><i /><span>STEP export</span></p>
-              : <p className="spec-line"><span>6 rotary axes</span><i /><span>1,300 mm reach</span><i /><span>{meshCount} CAD parts</span></p>}
+        <div className="workspace-bar">
+          <nav className="mode-nav" aria-label="Workbench modes">
+            {modes.map(({ id, label, compact, icon: Icon }) =>
+              <Button key={id} variant="ghost" aria-label={label} aria-pressed={workspace === id} onClick={() => switchWorkspace(id)}>
+                <Icon size={15} /><span className={compact && compact !== label ? 'mode-label-wide' : undefined}>{label}</span>
+                {compact && compact !== label && <span className="mode-label-compact" aria-hidden="true">{compact}</span>}
+              </Button>
+            )}
+          </nav>
+          <div className="workspace-actions">
+            {hasTimeline && <Button className="primary-play" onClick={togglePlayback} disabled={!canPlay}
+              aria-label={playing ? 'Pause motion' : 'Play motion'}>
+              {playing ? <Pause size={14} fill="currentColor" /> : <Play size={14} fill="currentColor" />}
+              <span>{playing ? 'Pause' : 'Play motion'}</span>
+            </Button>}
+            {hasTimeline && <IconButton label={timeline && !focused ? 'Hide timeline' : 'Show timeline'} aria-pressed={timeline && !focused}
+              onClick={() => { setTimeline(focused ? true : !timeline); setFocused(false) }}><PanelBottom size={17} /></IconButton>}
+            <IconButton label={inspectorVisible ? 'Hide inspector' : 'Show inspector'} aria-pressed={inspectorVisible}
+              onClick={() => { setDock(!inspectorVisible); setFocused(false) }}><PanelRight size={17} /></IconButton>
           </div>
-          {workspace !== 'service' && workspace !== 'cad' && <Button className="primary-play" onClick={togglePlayback} disabled={!canPlay}>
-            {playing ? <Pause size={17} fill="currentColor" /> : <Play size={17} fill="currentColor" />}
-            {playing ? 'Pause motion' : 'Play motion'}
-          </Button>}
         </div>
-
-        <nav className="mode-nav" aria-label="Workbench modes">
-          {modes.map(({ id, label, icon: Icon }) => <Button key={id} variant="ghost" aria-pressed={workspace === id} onClick={() => switchWorkspace(id)}><Icon size={16} />{label}</Button>)}
-        </nav>
-
-        <div className="workbench">
+        <div className={`workbench ${inspectorVisible ? 'has-sidebar' : ''}`} style={{ '--sidebar-width': `${sidebarWidth}px` }}>
           <div className="workbench-main">
             <section className={`viewport panel ${workspace === 'cad' ? 'cad-viewport' : ''}`} aria-label="3D viewport">
               <div className="viewport-header">
-                <div className="viewport-title"><Box size={16} /><h2>3D Viewport</h2></div>
+                <div className="viewport-title"><Box size={15} /><h2>3D Viewport</h2></div>
                 <div className="viewport-actions">
                   <IconButton label="Undo" onClick={() => moveHistory('undo')} disabled={!history.current.undo.length}><Undo2 size={16} /></IconButton>
                   <IconButton label="Redo" onClick={() => moveHistory('redo')} disabled={!history.current.redo.length}><Redo2 size={16} /></IconButton>
                   <span className="vertical-rule" />
                   <IconButton label="Snap transforms" aria-pressed={snap} onClick={() => setSnap(!snap)} title="Snap move 5 mm, rotate 5°, scale 0.1"><Magnet size={16} /></IconButton>
-                  <IconButton label="Measure distance" aria-pressed={measure} onClick={() => setMeasure(!measure)}><Ruler size={16} /></IconButton>
-                  <IconButton label="Section view" aria-pressed={section.enabled} onClick={() => setSection({ ...section, enabled: !section.enabled })}><Scissors size={16} /></IconButton>
-                  {workspace === 'inspect' && <Button className="explode-button" size="sm" variant="ghost" aria-pressed={explosion > 0} disabled={!ready} onClick={() => changeExplosion(explosion > 0 ? 0 : 1, !cameraMoved.current)}><Expand size={15} /> Explode</Button>}
+                  <IconButton label="Measure distance" aria-pressed={measure} onClick={() => { if (!measure) showInspector(); setMeasure(!measure) }}><Ruler size={16} /></IconButton>
+                  <IconButton label="Section view" aria-pressed={section.enabled} onClick={() => { if (!section.enabled) showInspector(); setSection({ ...section, enabled: !section.enabled }) }}><Scissors size={16} /></IconButton>
+                  {workspace === 'inspect' && <Button className="explode-button" aria-label="Explode" size="sm" variant="ghost" aria-pressed={explosion > 0} disabled={!ready} onClick={() => changeExplosion(explosion > 0 ? 0 : 1, !cameraMoved.current)}><Expand size={15} /><span>Explode</span></Button>}
                   <span className="vertical-rule" />
                   <IconButton label={grid ? 'Hide grid' : 'Show grid'} aria-pressed={grid} onClick={() => setGrid(!grid)}><Grid2X2 size={16} /></IconButton>
                   {workspace === 'inspect' && <IconButton label={wireframe ? 'Switch to solid view' : 'Switch to wireframe'} aria-pressed={wireframe} onClick={() => setWireframe(!wireframe)}><Layers3 size={17} /></IconButton>}
                   <span className="vertical-rule" />
                   <IconButton label="Reset view" onClick={() => changeView('perspective')}><RotateCcw size={16} /></IconButton>
+                  <IconButton label={focused ? 'Restore layout (Shift+Space)' : 'Maximize viewport (Shift+Space)'} aria-pressed={focused}
+                    onClick={() => setFocused(!focused)}>{focused ? <Minimize2 size={16} /> : <Maximize2 size={16} />}</IconButton>
                 </div>
               </div>
               <div className="render-area">
@@ -668,18 +759,32 @@ export default function App() {
                 </div>
                 <div className="viewport-hints mouse-hints"><span>Drag <b>Orbit</b></span><i /><span>Scroll <b>Zoom</b></span><i /><span>Right drag <b>Pan</b></span></div>
                 <div className="viewport-hints touch-hints"><span>Drag <b>Orbit</b></span><i /><span>Pinch <b>Zoom</b></span><i /><span>2 fingers <b>Pan</b></span></div>
-                <div className="view-stage"><i /> {workspace === 'cad' ? 'PARAMETRIC SOLID' : error ? 'VIEW UNAVAILABLE' : playing ? 'MOTION RUNNING' : !ready ? 'LOADING CAD' : workspace === 'service' ? 'CONCEPT DRIVE' : 'MODEL READY'}</div>
               </div>
             </section>
 
-            {workspace === 'cad' ? null : workspace === 'service' ? <ServiceFooter joint={serviceJoint} /> : <Timeline frame={frame} playing={playing} setFrame={seek}
+            {!lowerDockVisible ? null : workspace === 'service' ? <ServiceFooter joint={serviceJoint} /> : <Timeline frame={frame} playing={playing} setFrame={seek}
               setPlaying={(value) => value ? togglePlayback() : setPlaying(false)} lastFrame={lastFrame} canPlay={canPlay}
               trackName={workspace === 'teach' ? 'Taught poses' : workspace === 'pick' ? 'Pick & place' : 'Joint motion'}
               markers={workspace === 'teach' ? taught.map((key) => ({ ...key, name: 'Saved pose' })) : program}
             />}
           </div>
 
-          <aside className="sidebar">
+          {inspectorVisible && <div className="dock-splitter" role="separator" aria-orientation="vertical" aria-label="Resize inspector"
+            aria-valuemin={sidebarMin} aria-valuemax={sidebarMax} aria-valuenow={sidebarWidth} tabIndex={0}
+            onPointerDown={(event) => {
+              if (event.button !== 0) return
+              splitterDrag.current = { x: event.clientX, width: sidebarWidth }
+              event.currentTarget.setPointerCapture(event.pointerId)
+            }}
+            onPointerMove={resizeDock}
+            onLostPointerCapture={() => { splitterDrag.current = null }}
+            onKeyDown={(event) => {
+              if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return
+              event.preventDefault()
+              setSidebarWidth((width) => clampSidebar(event.key === 'Home' ? sidebarMin : event.key === 'End' ? sidebarMax : width + (event.key === 'ArrowLeft' ? 16 : -16)))
+            }}
+          />}
+          <aside className="sidebar" aria-label="Workbench inspector" hidden={!inspectorVisible}>
             {showViewportPanel && <ViewPanel measure={measure} result={measurement} clearMeasurement={() => viewport.current?.clearMeasurement()} section={section} setSection={setSection} />}
             {workspace === 'cad' && <CadPanel dimensions={dimensions} onApply={applyDimensions} onExport={exportAdapter}
               building={cadBuilding || !ready} exporting={stepExporting} error={cadError} />}
@@ -707,8 +812,15 @@ export default function App() {
         </div>
 
         <footer className="workspace-footer">
-          <span><span className="footer-dot" /> {error ? 'Model unavailable' : 'Three.js workbench'}</span>
-          <a href={sourceUrl} target="_blank" rel="noreferrer">Manufacturer CAD source</a>
+          <div className="status-group">
+            <span><i className={`footer-dot ${error ? 'error' : !ready || (cadBuilding && isCad) ? 'pending' : ''}`} />{stateLabel}</span>
+            <span className="status-context">{isCad ? 'Parametric solid' : workspace === 'service' ? 'Concept drive' : currentPart && workspace === 'inspect' ? currentPart + ' selected' : 'UR10e · 6 axes'}</span>
+          </div>
+          <div className="status-group">
+            <span className="status-platform">{desktop ? 'Desktop' : 'Web'}</span>
+            <span>mm</span>
+            <a href={sourceUrl} target="_blank" rel="noreferrer">CAD source</a>
+          </div>
         </footer>
       </main>
 
@@ -721,6 +833,7 @@ export default function App() {
             <div><dt>Move / Rotate / Scale</dt><dd><kbd>G</kbd> <kbd>R</kbd> <kbd>S</kbd></dd></div>
             <div><dt>Frame selected object</dt><dd><kbd>F</kbd></dd></div>
             <div><dt>Play or pause motion</dt><dd><kbd>Space</kbd></dd></div>
+            <div><dt>Maximize the viewport</dt><dd><kbd>Shift</kbd> <kbd>Space</kbd></dd></div>
             <div><dt>Undo / Redo</dt><dd><kbd>Ctrl/⌘ Z</kbd> <kbd>Ctrl/⌘ ⇧ Z</kbd></dd></div>
             <div><dt>Open / Save project</dt><dd><kbd>Ctrl/⌘ O</kbd> <kbd>Ctrl/⌘ S</kbd></dd></div>
           </dl>

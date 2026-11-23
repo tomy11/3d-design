@@ -36,8 +36,8 @@ export async function createViewport(element, { onSelect, onSelectDrive, onChang
   robot.tool.add(toolAxes)
   toolAxes.visible = false
   const scene = new T.Scene()
-  scene.background = new T.Color('#21272e')
-  scene.fog = new T.Fog('#21272e', 3.5, 10)
+  scene.background = new T.Color('#151b25')
+  scene.fog = new T.Fog('#151b25', 3.1, 10)
   const renderer = new T.WebGLRenderer({ antialias: true, alpha: false })
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.75))
   renderer.shadowMap.enabled = true
@@ -86,19 +86,19 @@ export async function createViewport(element, { onSelect, onSelectDrive, onChang
   lights[2].position.set(2, 3, -2.5)
   scene.add(...lights)
 
-  const floor = new T.Mesh(new T.PlaneGeometry(60, 60), new T.MeshStandardMaterial({ color: '#2d3540', roughness: 1 }))
+  const floor = new T.Mesh(new T.PlaneGeometry(60, 60), new T.MeshStandardMaterial({ color: '#17212e', roughness: 1 }))
   floor.rotation.x = -Math.PI / 2
   floor.position.y = -0.006
   floor.receiveShadow = true
   scene.add(floor)
 
-  const grid = new T.GridHelper(20, 200, '#9ea7ae', '#8c98a3')
+  const grid = new T.GridHelper(16, 160, '#788eaf', '#7288a6')
   grid.position.y = -0.004
   grid.material.transparent = true
-  grid.material.opacity = 0.22
+  grid.material.opacity = 0.19
   grid.material.toneMapped = false
   scene.add(grid)
-  const cadGrid = new T.GridHelper(1, 100, '#9ea7ae', '#8c98a3')
+  const cadGrid = new T.GridHelper(1, 100, '#8a9cc0', '#788bb0')
   cadGrid.rotation.x = Math.PI / 2
   cadGrid.position.z = -0.001
   cadGrid.material.transparent = true
@@ -196,7 +196,7 @@ export async function createViewport(element, { onSelect, onSelectDrive, onChang
   let mode = 'select'
   const outline = new T.Group()
   scene.add(outline)
-  const outlineMaterial = new T.LineBasicMaterial({ color: '#ffc254', transparent: true, opacity: 0.68 })
+  const outlineMaterial = new T.LineBasicMaterial({ color: '#b1c7ff', transparent: true, opacity: 0.8 })
   const edges = new Map()
   let outlinedMeshes = []
 
