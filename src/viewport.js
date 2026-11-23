@@ -11,7 +11,7 @@ import gripperNotice from '../public/models/robotiq-license.txt?raw'
 const axes = ['x', 'y', 'z']
 const poses = { perspective: [2.05, 2.1, 6.1], top: [0, 1, 0.001], right: [1, 0, 0], front: [0, 0, 1] }
 
-export async function createViewport(element, { onSelect, onSelectDrive, onChange, onOrbit, signal }) {
+export async function createViewport(element, { onSelect, onSelectDrive, onChange, onTransform, onMeasure, onOrbit, signal }) {
   const [robot, gripper] = await Promise.all([loadRobot(), loadGripper()])
   signal.throwIfAborted()
   const { plant, objects, pivots, visuals } = robot
@@ -98,6 +98,70 @@ export async function createViewport(element, { onSelect, onSelectDrive, onChang
   grid.material.opacity = 0.22
   grid.material.toneMapped = false
   scene.add(grid)
+  const cadGrid = new T.GridHelper(1, 100, '#9ea7ae', '#8c98a3')
+  cadGrid.rotation.x = Math.PI / 2
+  cadGrid.position.z = -0.001
+  cadGrid.material.transparent = true
+  cadGrid.material.opacity = 0.21
+  cadGrid.visible = false
+  scene.add(cadGrid)
+
+  const adapter = new T.Mesh(
+    new T.BufferGeometry(),
+    new T.MeshStandardMaterial({ color: '#87aebd', metalness: 0.40, roughness: 0.32, side: T.DoubleSide }),
+  )
+  adapter.name = 'Parametric flange adapter'
+  adapter.visible = false
+  scene.add(adapter)
+  let gridEnabled = true
+  let fittingAdapter = true
+  let measuring = false
+  const sectionPlane = new T.Plane()
+  const points = []
+  const measureGroup = new T.Group()
+  const markMaterial = new T.MeshBasicMaterial({ color: '#ffc85e', depthTest: false })
+  const markGeometry = new T.SphereGeometry(1, 14, 10)
+  const marks = [new T.Mesh(markGeometry, markMaterial), new T.Mesh(markGeometry, markMaterial)]
+  const segment = new T.Line(new T.BufferGeometry(), new T.LineBasicMaterial({ color: '#ffc85e', depthTest: false }))
+  segment.geometry.setAttribute('position', new T.BufferAttribute(new Float32Array(6), 3))
+  segment.frustumCulled = false
+  for (const mark of marks) mark.renderOrder = 20
+  segment.renderOrder = 20
+  measureGroup.add(...marks, segment)
+  measureGroup.visible = false
+  scene.add(measureGroup)
+
+  function clearMeasurement() {
+    points.length = 0
+    measureGroup.visible = false
+    onMeasure({ count: 0, distance: 0 })
+    dirty = true
+  }
+
+  function markPoint(point) {
+    if (points.length === 2) points.length = 0
+    points.push(point.clone())
+    measureGroup.visible = true
+    marks.forEach((mark, index) => {
+      mark.visible = index < points.length
+      if (mark.visible) mark.position.copy(points[index])
+      mark.scale.setScalar(workspace === 'cad' ? 0.0016 : 0.006)
+    })
+    segment.visible = points.length === 2
+    if (segment.visible) {
+      const position = segment.geometry.attributes.position
+      points.forEach(({ x, y, z }, index) => position.setXYZ(index, x, y, z))
+      position.needsUpdate = true
+    }
+    onMeasure({ count: points.length, distance: points.length === 2 ? points[0].distanceTo(points[1]) * 1000 : 0 })
+    dirty = true
+  }
+
+  function sceneGrid() {
+    grid.visible = gridEnabled && workspace !== 'cad'
+    cadGrid.visible = gridEnabled && workspace === 'cad'
+    floor.visible = workspace !== 'cad'
+  }
 
   scene.add(plant)
   const wireframes = new Map()
@@ -112,7 +176,15 @@ export async function createViewport(element, { onSelect, onSelectDrive, onChang
 
   const gizmo = new TransformControls(camera, renderer.domElement)
   gizmo.setSize(0.75)
-  gizmo.addEventListener('dragging-changed', (event) => { orbit.enabled = !event.value })
+  let drag
+  gizmo.addEventListener('dragging-changed', (event) => {
+    orbit.enabled = !event.value
+    if (event.value && objects[selected]) drag = { id: selected, before: readTransform(selected) }
+    else if (drag) {
+      onTransform({ ...drag, after: readTransform(drag.id) })
+      drag = null
+    }
+  })
   gizmo.addEventListener('change', () => { dirty = true })
   gizmo.addEventListener('objectChange', () => {
     if (explosion) robot.separate(explosion)
@@ -150,7 +222,7 @@ export async function createViewport(element, { onSelect, onSelectDrive, onChang
     gizmo.detach()
     outline.clear()
     outlinedMeshes = []
-    if (workspace === 'service' || workspace === 'pick') return
+    if (measuring || workspace === 'service' || workspace === 'pick' || workspace === 'cad') return
     const object = objects[id]
     if (!object || !effectivelyVisible(linkVisuals[id] ?? object)) return
     if (tool !== 'select' && workspace === 'inspect') {
@@ -171,6 +243,10 @@ export async function createViewport(element, { onSelect, onSelectDrive, onChang
 
   function view(name) {
     const direction = new T.Vector3(...poses[name]).normalize()
+    if (workspace === 'cad') {
+      if (adapter.geometry.attributes.position) frameObject(adapter, direction, 3.4)
+      return
+    }
     if (workspace === 'service') {
       if (name === 'perspective') {
         direction.set(0.8, -0.7, -0.7).applyQuaternion(drive.root.getWorldQuaternion(new T.Quaternion()))
@@ -200,12 +276,12 @@ export async function createViewport(element, { onSelect, onSelectDrive, onChang
     if (bounds.isEmpty()) return
     const sphere = bounds.getBoundingSphere(new T.Sphere())
     orbit.target.copy(sphere.center)
-    camera.position.copy(sphere.center).addScaledVector(direction, Math.max(0.13, sphere.radius * factor / Math.min(camera.aspect, 1)))
+    camera.position.copy(sphere.center).addScaledVector(direction, Math.max(workspace === 'cad' ? 0.03 : 0.13, sphere.radius * factor / Math.min(camera.aspect, 1)))
     orbit.update()
   }
 
   function focus() {
-    const target = workspace === 'service'
+    const target = workspace === 'cad' ? adapter : workspace === 'service'
       ? (drive.groups[servicePart] ?? drive.root)
       : (linkVisuals[selected] ?? objects[selected])
     const direction = camera.position.clone().sub(orbit.target).normalize()
@@ -261,14 +337,21 @@ export async function createViewport(element, { onSelect, onSelectDrive, onChang
     const rect = renderer.domElement.getBoundingClientRect()
     const pointer = new T.Vector2((event.clientX - rect.left) / rect.width * 2 - 1, 1 - (event.clientY - rect.top) / rect.height * 2)
     raycaster.setFromCamera(pointer, camera)
-    if (workspace === 'pick') return
+    const intersections = (object) => raycaster.intersectObject(object).find(({ object: hit, point }) =>
+      effectivelyVisible(hit) && (!renderer.clippingPlanes.length || sectionPlane.distanceToPoint(point) >= -0.000001))
+    if (measuring) {
+      const hit = intersections(workspace === 'cad' ? adapter : workspace === 'service' ? drive.root : plant)
+      if (hit) markPoint(hit.point)
+      return
+    }
+    if (workspace === 'pick' || workspace === 'cad') return
     if (workspace === 'service') {
-      let object = raycaster.intersectObject(drive.root).find((hit) => effectivelyVisible(hit.object))?.object
+      let object = intersections(drive.root)?.object
       while (object && !object.userData.drive) object = object.parent
       if (object) onSelectDrive(object.userData.drive)
       return
     }
-    const hit = raycaster.intersectObject(plant).find(({ object }) => effectivelyVisible(object))
+    const hit = intersections(plant)
     let object = hit?.object
     while (object && !object.userData.part) object = object.parent
     onSelect(object?.userData.part ?? null)
@@ -285,15 +368,85 @@ export async function createViewport(element, { onSelect, onSelectDrive, onChang
     renderer.render(scene, camera)
   })
 
+  function readTransform(id) {
+    const object = objects[id]
+    if (!object) return null
+    return Object.fromEntries(['position', 'rotation', 'scale'].map((type) => [
+      type, axes.map((axis) => type === 'rotation' ? T.MathUtils.radToDeg(object[type][axis]) : object[type][axis]),
+    ]))
+  }
+
+  function setTransform(id, state) {
+    const object = objects[id]
+    object.position.set(...state.position)
+    object.rotation.set(...state.rotation.map(T.MathUtils.degToRad), object.rotation.order)
+    object.scale.set(...state.scale)
+    dirty = true
+    if (explosion) robot.separate(explosion)
+    onChange()
+  }
+
   return {
     select: updateSelection,
     view,
     focus,
     toolReadout,
+    clearMeasurement,
+    setAdapter({ positions, normals, indices }) {
+      const geometry = new T.BufferGeometry()
+      geometry.setAttribute('position', new T.BufferAttribute(positions, 3))
+      geometry.setAttribute('normal', new T.BufferAttribute(normals, 3))
+      geometry.setIndex(new T.BufferAttribute(indices, 1))
+      geometry.computeBoundingBox()
+      geometry.computeBoundingSphere()
+      adapter.geometry.dispose()
+      adapter.geometry = geometry
+      if (workspace === 'cad' && fittingAdapter) view('perspective')
+      fittingAdapter = false
+      dirty = true
+    },
+    setMeasure(enabled) {
+      measuring = enabled
+      renderer.domElement.style.cursor = enabled ? 'crosshair' : ''
+      if (!enabled) clearMeasurement()
+      updateSelection(selected)
+    },
+    setSection({ enabled, axis, offset }) {
+      sectionPlane.normal.set(0, 0, 0)
+      sectionPlane.normal[axis] = 1
+      sectionPlane.constant = -offset / 1000
+      renderer.clippingPlanes = enabled ? [sectionPlane] : []
+      dirty = true
+    },
+    setSnap(enabled) {
+      gizmo.setTranslationSnap(enabled ? 0.005 : null)
+      gizmo.setRotationSnap(enabled ? T.MathUtils.degToRad(5) : null)
+      gizmo.setScaleSnap(enabled ? 0.1 : null)
+    },
+    captureScene() {
+      return {
+        transforms: Object.fromEntries(Object.keys(objects).map((id) => [id, readTransform(id)])),
+        camera: { position: camera.position.toArray(), target: orbit.target.toArray() },
+      }
+    },
+    restoreScene(snapshot) {
+      for (const [id, state] of Object.entries(snapshot.transforms)) setTransform(id, state)
+      camera.position.fromArray(snapshot.camera.position)
+      orbit.target.fromArray(snapshot.camera.target)
+      orbit.update()
+      fittingAdapter = false
+      dirty = true
+    },
+    restoreTransform: setTransform,
     setWorkspace(next) {
       workspace = next
       dirty = true
       const servicing = next === 'service'
+      plant.visible = next !== 'cad'
+      adapter.visible = next === 'cad'
+      fittingAdapter = true
+      sceneGrid()
+      if (measuring) clearMeasurement()
       drive.root.visible = servicing
       pickCell.setVisible(next === 'pick')
       toolAxes.visible = showToolAxes && (next === 'teach' || next === 'pick')
@@ -336,7 +489,7 @@ export async function createViewport(element, { onSelect, onSelectDrive, onChang
     },
     setVisibility(visible) {
       for (const [id, object] of Object.entries(objects)) {
-        (linkVisuals[id] ?? object).visible = visible.has(id)
+        (linkVisuals[id] ?? object).visible = visible.has(id) && (id !== 'robot' || workspace !== 'cad')
       }
       updateSelection(selected)
     },
@@ -346,29 +499,27 @@ export async function createViewport(element, { onSelect, onSelectDrive, onChang
     },
     setGrid(visible) {
       dirty = true
-      grid.visible = visible
+      gridEnabled = visible
+      sceneGrid()
     },
-    read(id) {
-      const object = objects[id]
-      if (!object) return null
-      return Object.fromEntries(['position', 'rotation', 'scale'].map((type) => [
-        type, axes.map((axis) => type === 'rotation' ? T.MathUtils.radToDeg(object[type][axis]) : object[type][axis]),
-      ]))
-    },
+    read: readTransform,
     write(id, type, axis, value) {
-      dirty = true
-      objects[id][type][axis] = type === 'rotation' ? T.MathUtils.degToRad(value) : value
-      if (explosion) robot.separate(explosion)
-      onChange()
+      const before = readTransform(id)
+      const after = { ...before, [type]: [...before[type]] }
+      after[type][axes.indexOf(axis)] = value
+      setTransform(id, after)
+      onTransform({ id, before, after })
     },
     reset(id) {
-      dirty = true
-      const entries = id ? [[id, objects[id]]] : Object.entries(objects)
-      for (const [key, object] of entries) {
-        for (const type of ['position', 'rotation', 'scale']) object[type].copy(defaults[key][type])
+      const before = readTransform(id)
+      const state = defaults[id]
+      const after = {
+        position: state.position.toArray(),
+        rotation: axes.map((axis) => T.MathUtils.radToDeg(state.rotation[axis])),
+        scale: state.scale.toArray(),
       }
-      if (explosion) robot.separate(explosion)
-      onChange()
+      setTransform(id, after)
+      onTransform({ id, before, after })
     },
     async export({ service, pick, clipName, duration, sample }) {
       const { GLTFExporter } = await import('three/addons/exporters/GLTFExporter.js')

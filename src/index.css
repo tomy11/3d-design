@@ -309,3 +309,35 @@ kbd { font: 12px var(--mono); border: 1px solid #d8dacf; border-radius: 4px; pad
   .mode-nav button svg { width: 13px; height: 13px; }
   .joint-console small { font-size: 12px; }
 }
+
+.cad-form { display: grid; gap: 12px; }
+.cad-dimensions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 8px; }
+.cad-dimensions label { display: grid; gap: 5px; font-size: 12px; font-weight: 600; color: #4a564c; }
+.cad-dimensions input, .section-controls input[type="number"] { width: 100%; min-width: 0; height: 34px; padding: 0 7px; border: 1px solid #d9ddd2; border-radius: 5px; background: #f3f4ef; color: #222922; font: 13px var(--mono); }
+.cad-buttons { display: grid; grid-template-columns: 1fr auto; gap: 6px; }
+.cad-form .mode-copy { margin: 0; }
+.cad-error { font-size: 13px; background: #fbe6dc; color: #752c18; border-radius: 5px; padding: 7px 9px; }
+.cad-loading { position: absolute; top: 50%; left: 50%; z-index: 2; transform: translate(-50%, -50%); padding: 8px 12px; border-radius: 5px; background: #252d34; color: #fafbf8; font-size: 14px; pointer-events: none; }
+.cad-viewport .render-area { height: clamp(420px, calc(100svh - 340px), 670px); }
+.workbench-tools { display: grid; gap: 11px; }
+.measurement-result { display: flex; align-items: center; justify-content: space-between; gap: 6px; padding: 7px 8px; border: 1px solid #efe2be; background: #fbf1d8; border-radius: 5px; }
+.measurement-result small, .measurement-result output { display: block; }
+.measurement-result small { color: #685432; font-size: 11px; }
+.measurement-result output { color: #513a12; font: 650 14px var(--mono); margin-top: 3px; }
+.section-controls { display: grid; gap: 7px; }
+.section-controls label { display: flex; align-items: center; justify-content: space-between; gap: 12px; color: #4a564c; font-size: 13px; }
+.section-controls input[type="number"] { width: 100px; }
+.section-controls input[type="range"] { width: 100%; accent-color: #bb8732; }
+.section-axes { display: grid; grid-template-columns: repeat(3, 1fr); gap: 5px; }
+.section-axes button[aria-pressed="true"] { background: #faedca; border-color: #e1c879; color: #624517; }
+@media (max-width: 810px) {
+  .cad-viewport .render-area { height: clamp(365px, 70vw, 490px); }
+}
+@media (max-width: 540px) {
+  .mode-nav button { padding-inline: 3px; }
+  .mode-nav button svg { display: none; }
+  .viewport-header { min-height: 42px; height: auto; flex-wrap: wrap; padding-block: 5px; gap: 3px 4px; }
+  .viewport-actions { flex-wrap: wrap; }
+  .viewport-actions .vertical-rule { display: none; }
+  .viewport-actions button { width: 27px; }
+}
