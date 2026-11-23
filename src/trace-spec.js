@@ -1,5 +1,6 @@
 // A traced CAD profile in millimetres. views maps front/right/top to regions:
 // [{ outer: loop, holes: [loop] }], where a loop is { points: [[x, y], ...] } or { circle: [cx, cy, r] }.
+// A traced circle may also carry diameter: a size in mm typed by the user, kept when the scale changes.
 // mode 'extrude' extrudes the front view to thickness along Z; 'revolve' spins the front view
 // right of axis around Y (the image vertical); 'views' intersects the views extruded through the part.
 export const traceLimits = { width: [0.1, 5000], thickness: [0.2, 1000], points: 2000, loops: 200 }
@@ -8,7 +9,10 @@ const finite = (value) => Number.isFinite(value) && Math.abs(value) <= 10000
 const point = (item) => Array.isArray(item) && item.length === 2 && item.every(finite)
 
 export function validLoop(loop) {
-  if (loop?.circle) return Array.isArray(loop.circle) && loop.circle.length === 3 && loop.circle.every(finite) && loop.circle[2] > 0
+  if (loop?.circle) {
+    return Array.isArray(loop.circle) && loop.circle.length === 3 && loop.circle.every(finite) && loop.circle[2] > 0 &&
+      (loop.diameter === undefined || (finite(loop.diameter) && loop.diameter > 0))
+  }
   return Array.isArray(loop?.points) && loop.points.length >= 3 && loop.points.length <= traceLimits.points && loop.points.every(point)
 }
 

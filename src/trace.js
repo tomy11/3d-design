@@ -2,35 +2,48 @@
 // until toMillimetres converts the traced regions into a CAD profile.
 
 // A traced loop is either { points: [[x, y], ...] } or a true circle { circle: [cx, cy, r] }.
+// A circle the user placed or sized also has diameter in mm, which wins over its pixel radius.
 // Regions are [{ outer: loop, holes: [loop, ...] }].
 
+// Photos and drawings are reduced to 720 px; mesh silhouettes are sharp, so they keep 1600 px.
 export const maxTraceSize = 720
+export const meshTraceSize = 1600
 export const viewNames = ['front', 'right', 'top']
 export const viewLabels = { front: 'Front', right: 'Right', top: 'Top' }
 export const defaultTraceSettings = { threshold: 128, invert: false, useAlpha: false, tolerance: 1.2, minArea: 40, circles: true }
 
-export async function loadTraceImage(file, name = file.name) {
+export async function loadTraceImage(file, name = file.name, { maxSize = maxTraceSize, lossless = false } = {}) {
   if (!file.type.startsWith('image/')) throw new Error('Choose a PNG, JPEG, WebP or other image file.')
   const bitmap = await createImageBitmap(file)
-  const scale = Math.min(1, maxTraceSize / Math.max(bitmap.width, bitmap.height))
-  const width = Math.max(1, Math.round(bitmap.width * scale))
-  const height = Math.max(1, Math.round(bitmap.height * scale))
+  return imageFromSource(bitmap, bitmap.width, bitmap.height, name, { maxSize, lossless })
+}
+
+// Draws any canvas image source into a trace image, reduced to maxSize.
+function imageFromSource(source, sourceWidth, sourceHeight, name, { maxSize, lossless, url: keepUrl }) {
+  const scale = Math.min(1, maxSize / Math.max(sourceWidth, sourceHeight))
+  const width = Math.max(1, Math.round(sourceWidth * scale))
+  const height = Math.max(1, Math.round(sourceHeight * scale))
   const canvas = document.createElement('canvas')
   canvas.width = width
   canvas.height = height
   const context = canvas.getContext('2d', { willReadFrequently: true })
-  context.drawImage(bitmap, 0, 0, width, height)
-  bitmap.close()
+  context.drawImage(source, 0, 0, width, height)
+  source.close?.()
   const pixels = context.getImageData(0, 0, width, height)
   const analysis = analyse(pixels)
-  // Kept small enough to embed in a project file: PNG only when transparency matters.
-  const url = analysis.hasAlpha ? canvas.toDataURL('image/png') : canvas.toDataURL('image/jpeg', 0.9)
+  // Kept small enough to embed in a project file: PNG only when transparency or sharp edges matter.
+  const url = keepUrl ?? (analysis.hasAlpha || lossless ? canvas.toDataURL('image/png') : canvas.toDataURL('image/jpeg', 0.9))
   return { name, width, height, url, ...analysis }
 }
 
+export function imageFromCanvas(canvas, name) {
+  return imageFromSource(canvas, canvas.width, canvas.height, name, { maxSize: maxTraceSize })
+}
+
+// Reopens an image saved in a project at its saved size, so traced pixel positions still match.
 export async function imageFromDataUrl(url, name) {
-  const blob = await (await fetch(url)).blob()
-  return loadTraceImage(blob, name)
+  const bitmap = await createImageBitmap(await (await fetch(url)).blob())
+  return imageFromSource(bitmap, bitmap.width, bitmap.height, name, { maxSize: Math.max(bitmap.width, bitmap.height), url })
 }
 
 // Lightly blurred brightness and alpha, plus an automatic threshold.
@@ -298,8 +311,26 @@ export function regionBounds(regions) {
   }
 }
 
-export function loopContains(loop, point) {
-  if (loop.circle) return Math.hypot(point[0] - loop.circle[0], point[1] - loop.circle[1]) <= loop.circle[2]
+// A circle's radius in image pixels at the given mm-per-pixel scale.
+export function circleRadius(loop, scale) {
+  return loop.diameter && scale ? loop.diameter / 2 / scale : loop.circle[2]
+}
+
+// True when a view is a single round outline, like the top view of a turned part.
+export function isRoundView(view) {
+  if (view?.regions.length !== 1) return false
+  const { outer } = view.regions[0]
+  if (outer.circle) return true
+  const [minX, minY, maxX, maxY] = loopExtents(outer)
+  const width = maxX - minX
+  const height = maxY - minY
+  if (!width || Math.abs(width - height) > 0.04 * Math.max(width, height)) return false
+  const fill = Math.abs(signedArea(outer.points)) / (Math.PI * (width / 2) * (height / 2))
+  return fill > 0.95 && fill < 1.04
+}
+
+export function loopContains(loop, point, scale = null) {
+  if (loop.circle) return Math.hypot(point[0] - loop.circle[0], point[1] - loop.circle[1]) <= circleRadius(loop, scale)
   return pointInLoop(point, loop.points)
 }
 
@@ -323,7 +354,7 @@ export function viewToMillimetres(view) {
   const cy = (bounds.minY + bounds.maxY) / 2
   const point = ([x, y]) => [round((x - cx) * scale), round((cy - y) * scale)]
   const convert = (loop) => loop.circle
-    ? { circle: [...point(loop.circle), round(loop.circle[2] * scale)] }
+    ? { circle: [...point(loop.circle), round(loop.diameter ? loop.diameter / 2 : loop.circle[2] * scale)] }
     : { points: loop.points.map(point) }
   return {
     regions: view.regions.map(({ outer, holes }) => ({ outer: convert(outer), holes: holes.map(convert) })),

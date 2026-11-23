@@ -391,3 +391,7 @@ kbd { font: 11px var(--mono); border: 1px solid var(--line); border-radius: 4px;
 .trace-turns span { flex: 1; color: #c8d4e9; font-size: 12px; font-weight: 590; }
 .trace-turns button { gap: 4px; font: 600 12px var(--mono); }
 .trace-mesh + .trace-views { margin-top: 4px; padding-top: 10px; border-top: 1px solid var(--rule); }
+.trace-straighten .trace-scale-points { grid-template-columns: 1fr 1fr; }
+.trace-suggest { display: grid; gap: 6px; padding: 8px 10px; border: 1px solid color-mix(in srgb, #13a37a 45%, transparent); border-radius: 6px; background: color-mix(in srgb, #13a37a 10%, transparent); }
+.trace-suggest p { margin: 0; font-size: 12px; line-height: 1.45; }
+.trace-suggest button { justify-self: start; }

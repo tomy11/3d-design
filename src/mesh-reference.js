@@ -1,6 +1,6 @@
 import * as T from 'three'
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js'
-import { maxTraceSize } from './trace'
+import { meshTraceSize } from './trace'
 
 // A reference mesh is any GLB, glTF, OBJ or STL, such as the output of an AI
 // image-to-3D service or a scan. It is only used to look at and to make silhouettes.
@@ -11,14 +11,26 @@ const maxMeshBytes = 200 * 1024 * 1024
 async function parse(file) {
   const extension = file.name.split('.').pop().toLowerCase()
   if (extension === 'glb' || extension === 'gltf') {
-    const [{ GLTFLoader }, { MeshoptDecoder }] = await Promise.all([
-      import('three/addons/loaders/GLTFLoader.js'), import('three/addons/libs/meshopt_decoder.module.js'),
+    const [{ GLTFLoader }, { DRACOLoader }, { MeshoptDecoder }] = await Promise.all([
+      import('three/addons/loaders/GLTFLoader.js'), import('three/addons/loaders/DRACOLoader.js'),
+      import('three/addons/libs/meshopt_decoder.module.js'),
     ])
-    const loader = new GLTFLoader().setMeshoptDecoder(MeshoptDecoder)
+    // Many AI image-to-3D services and scanners compress GLB geometry with Draco.
+    const draco = new DRACOLoader().setDecoderPath(import.meta.env.BASE_URL + 'draco/').setDecoderConfig({ type: 'wasm' })
+    const loader = new GLTFLoader().setDRACOLoader(draco).setMeshoptDecoder(MeshoptDecoder)
     const source = extension === 'glb' ? await file.arrayBuffer() : await file.text()
-    const gltf = await loader.parseAsync(source, '')
-    // glTF is in metres.
-    return { root: gltf.scene, mmPerUnit: 1000 }
+    try {
+      const gltf = await loader.parseAsync(source, '')
+      // glTF is in metres.
+      return { root: gltf.scene, mmPerUnit: 1000 }
+    } catch (failure) {
+      const message = String(failure?.message ?? failure)
+      if (/KTX2|basisu/i.test(message)) throw new Error('The file uses KTX2 textures, which are not supported. Export it with PNG or JPEG textures, or as OBJ or STL.')
+      if (/external|uri|fetch/i.test(message) && extension === 'gltf') throw new Error('This glTF refers to separate .bin or texture files. Export it as a single GLB instead.')
+      throw failure
+    } finally {
+      draco.dispose()
+    }
   }
   if (extension === 'obj') {
     const { OBJLoader } = await import('three/addons/loaders/OBJLoader.js')
@@ -111,7 +123,7 @@ export async function renderSilhouettes(geometry) {
       const height = size[down]
       // Leave a margin so the outline never touches the image edge.
       const margin = Math.max(width, height) * 0.06 + 1e-6
-      const pixels = (maxTraceSize - 2) / (Math.max(width, height) + 2 * margin)
+      const pixels = (meshTraceSize - 2) / (Math.max(width, height) + 2 * margin)
       const imageWidth = Math.max(8, Math.round((width + 2 * margin) * pixels))
       const imageHeight = Math.max(8, Math.round((height + 2 * margin) * pixels))
       renderer.setPixelRatio(1)

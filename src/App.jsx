@@ -11,7 +11,7 @@ import { PickPanel, ServiceFooter, ServicePanels, TeachPanels, ToolFrame } from 
 import { gripperLicense, gripperSource } from './pick-cell'
 import { CadPanel, ViewPanel } from './CadPanel'
 import { TracePanel } from './TracePanel'
-import { imageFromDataUrl, loadTraceImage, traceToSpec } from './trace'
+import { imageFromDataUrl, loadTraceImage, meshTraceSize, traceToSpec } from './trace'
 import { createView, emptyTrace, serializeTrace, withView } from './trace-state'
 import { loadMesh, placeMesh, renderSilhouettes } from './mesh-reference'
 import { Matrix4, Vector3 } from 'three'
@@ -383,7 +383,7 @@ export default function App() {
       const shots = await renderSilhouettes(meshPlaced.current)
       let next = trace
       for (const [name, { blob, width }] of Object.entries(shots)) {
-        const image = await loadTraceImage(blob, mesh.name + ' ' + name + '.png')
+        const image = await loadTraceImage(blob, mesh.name + ' ' + name + '.png', { maxSize: meshTraceSize, lossless: true })
         const id = 'img-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6)
         traceImages.current[id] = image
         const view = createView(image, id)
@@ -405,6 +405,15 @@ export default function App() {
     } catch (failure) {
       setNotice('Could not import image. ' + (failure?.message ?? String(failure)))
     }
+  }
+
+  // Replaces a view with its straightened photo. With the rectangle's real width, the scale is set too.
+  function straightenTraceView(name, image, realWidth) {
+    const id = 'img-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6)
+    traceImages.current[id] = image
+    const view = createView(image, id)
+    const scale = realWidth ? { ...view.scale, mode: 'points', points: [[0, 0], [image.width, 0]], distance: realWidth } : view.scale
+    changeTrace(withView(trace, name, () => ({ ...view, scale })), 'straightened photo')
   }
 
   async function exportAdapter() {
@@ -928,7 +937,7 @@ export default function App() {
             {/* Stays mounted so the imported image and point edits survive switching modes. */}
             <div hidden={workspace !== 'cad' || cadSource !== 'trace'}>
               <TracePanel trace={trace} images={traceImages.current} result={traceResult} onChange={changeTrace} onLive={setTrace} onImport={importTraceImage}
-                mesh={mesh} onImportMesh={importMesh} onMeshSize={(longest) => placeReference(longest, mesh.visible)} onMeshTurn={turnMesh}
+                onStraighten={straightenTraceView} mesh={mesh} onImportMesh={importMesh} onMeshSize={(longest) => placeReference(longest, mesh.visible)} onMeshTurn={turnMesh}
                 onMeshVisible={(visible) => { setMesh({ ...mesh, visible }); viewport.current?.setReference(undefined, visible) }} onMeshRemove={removeMesh} onViewsFromMesh={viewsFromMesh}
                 onBuild={() => setTraceSpec(traceResult.spec)} onExport={exportAdapter} building={cadBuilding || !ready} exporting={stepExporting}
                 error={cadSource === 'trace' ? cadError : ''} upToDate={traceUpToDate && !cadBuilding && !cadError} />

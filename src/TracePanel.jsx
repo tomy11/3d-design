@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState } from 'react'
-import { Box, CircleDot, Download, Eye, EyeOff, ImagePlus, MousePointer2, Ruler, RotateCcw, RotateCw, ScanLine, Trash2 } from 'lucide-react'
+import { Box, CircleDot, Crop, Download, Eye, EyeOff, ImagePlus, MousePointer2, Ruler, RotateCcw, RotateCw, ScanLine, Trash2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
-import { loopContains, regionBounds, traceImage, viewLabels, viewNames, viewScale } from './trace'
+import { circleRadius, isRoundView, loopContains, regionBounds, traceImage, viewLabels, viewNames, viewScale } from './trace'
 import { traceLimits } from './trace-spec'
 import { withView } from './trace-state'
 import { meshAccept } from './mesh-reference'
+import { orderCorners, straightenImage } from './perspective'
 
 const grab = 8
 
@@ -103,13 +104,17 @@ function MeshSection({ mesh, onImportMesh, onMeshSize, onMeshTurn, onMeshVisible
   )
 }
 
-export function TracePanel({ trace, images, result, onChange, onLive, onImport, onBuild, onExport, building, exporting, error, upToDate, ...meshProps }) {
+export function TracePanel({ trace, images, result, onChange, onLive, onImport, onStraighten, onBuild, onExport, building, exporting, error, upToDate, ...meshProps }) {
   const name = trace.view
   const view = trace.views[name]
   const image = view ? images[view.imageId] : null
   const scale = view ? viewScale(view) : null
   const [tool, setTool] = useState('edit')
   const [holeDiameter, setHoleDiameter] = useState(10)
+  const [corners, setCorners] = useState([])
+  const [rectangle, setRectangle] = useState({ width: NaN, height: NaN })
+  const [straightening, setStraightening] = useState(false)
+  const [straightenError, setStraightenError] = useState('')
   const canvas = useRef(null)
   const picture = useRef(null)
   const drag = useRef(null)
@@ -118,6 +123,24 @@ export function TracePanel({ trace, images, result, onChange, onLive, onImport, 
   const redraw = useRef(null)
 
   useEffect(() => { setTool('edit') }, [name])
+  useEffect(() => { setCorners([]); setStraightenError('') }, [name, image])
+
+  async function straighten() {
+    setStraightening(true)
+    setStraightenError('')
+    try {
+      const { width, height } = rectangle
+      const aspect = Number.isFinite(width) && Number.isFinite(height) ? width / height : null
+      const straightened = await straightenImage(image, corners, aspect)
+      onStraighten(name, straightened, Number.isFinite(width) ? width : null)
+      setCorners([])
+      setTool('edit')
+    } catch (failure) {
+      setStraightenError(failure?.message ?? String(failure))
+    } finally {
+      setStraightening(false)
+    }
+  }
 
   const setViewState = (change, label) => onChange(withView(trace, name, change), label)
   const setShape = (change, label) => onChange({ ...trace, shape: { ...trace.shape, ...change } }, label)
@@ -170,8 +193,9 @@ export function TracePanel({ trace, images, result, onChange, onLive, onImport, 
     context.setTransform(zoom, 0, 0, zoom, 0, 0)
     const path = (loop) => {
       if (loop.circle) {
-        context.moveTo(loop.circle[0] + loop.circle[2], loop.circle[1])
-        context.arc(loop.circle[0], loop.circle[1], loop.circle[2], 0, Math.PI * 2)
+        const radius = circleRadius(loop, scale)
+        context.moveTo(loop.circle[0] + radius, loop.circle[1])
+        context.arc(loop.circle[0], loop.circle[1], radius, 0, Math.PI * 2)
       } else {
         loop.points.forEach(([x, y], index) => context[index ? 'lineTo' : 'moveTo'](x, y))
         context.closePath()
@@ -234,6 +258,25 @@ export function TracePanel({ trace, images, result, onChange, onLive, onImport, 
         context.stroke()
       }
     }
+    if (tool === 'corners' && corners.length) {
+      const shown = corners.length === 4 ? orderCorners(corners) : corners
+      context.strokeStyle = '#a335d6'
+      context.fillStyle = 'rgba(163, 53, 214, 0.12)'
+      context.lineWidth = 1.8 * px
+      context.beginPath()
+      shown.forEach(([x, y], index) => context[index ? 'lineTo' : 'moveTo'](x, y))
+      if (shown.length === 4) {
+        context.closePath()
+        context.fill()
+      }
+      context.stroke()
+      context.fillStyle = '#a335d6'
+      for (const [x, y] of shown) {
+        context.beginPath()
+        context.arc(x, y, 4 * px, 0, Math.PI * 2)
+        context.fill()
+      }
+    }
   }
   redraw.current = draw
   useEffect(draw)
@@ -246,6 +289,11 @@ export function TracePanel({ trace, images, result, onChange, onLive, onImport, 
   function pointerDown(event) {
     if (event.button !== 0) return
     const { point, ratio } = toImage(event)
+    if (tool === 'corners') {
+      const at = [Math.max(0, Math.min(image.width, point[0])), Math.max(0, Math.min(image.height, point[1]))]
+      setCorners((list) => list.length >= 4 ? [at] : [...list, at])
+      return
+    }
     if (tool === 'scale') {
       const points = view.scale.points.length === 1 ? [view.scale.points[0], point] : [point]
       setViewState((current) => ({ ...current, scale: { ...current.scale, mode: 'points', points } }), 'scale points')
@@ -253,13 +301,13 @@ export function TracePanel({ trace, images, result, onChange, onLive, onImport, 
       return
     }
     if (tool === 'hole') {
-      const region = view.regions.findIndex((item) => loopContains(item.outer, point) && !item.holes.some((hole) => loopContains(hole, point)))
+      const region = view.regions.findIndex((item) => loopContains(item.outer, point, scale) && !item.holes.some((hole) => loopContains(hole, point, scale)))
       if (region < 0) return
       const radius = scale ? holeDiameter / 2 / scale : image.width * 0.03
       setViewState((current) => ({
         ...current,
         edited: true,
-        regions: current.regions.map((item, index) => index === region ? { ...item, holes: [...item.holes, { circle: [point[0], point[1], radius] }] } : item),
+        regions: current.regions.map((item, index) => index === region ? { ...item, holes: [...item.holes, { circle: [point[0], point[1], radius], diameter: holeDiameter }] } : item),
       }), 'added hole')
       setTool('edit')
       return
@@ -284,7 +332,7 @@ export function TracePanel({ trace, images, result, onChange, onLive, onImport, 
       ...current,
       edited: true,
       regions: editLoop(current.regions, hit, (loop) => loop.circle
-        ? { circle: [at[0], at[1], loop.circle[2]] }
+        ? { ...loop, circle: [at[0], at[1], loop.circle[2]] }
         : { points: loop.points.map((p, index) => index === hit.pointIndex ? at : p) }),
     })))
   }
@@ -330,6 +378,9 @@ export function TracePanel({ trace, images, result, onChange, onLive, onImport, 
   const hints = {
     edit: 'Drag a point or circle centre · double-click a line to add a point · right-click to remove.',
     hole: 'Click inside the part to place a ' + holeDiameter + ' mm hole.',
+    corners: corners.length < 4
+      ? 'Click corner ' + (corners.length + 1) + ' of 4 of something truly rectangular: the paper, a drawing border or a square face.'
+      : 'Enter the rectangle\'s real size if you know it, then straighten.',
     scale: view?.scale.points.length === 1 ? 'Click the second point of a known distance.' : 'Click the first point of a known distance.',
   }
 
@@ -354,7 +405,7 @@ export function TracePanel({ trace, images, result, onChange, onLive, onImport, 
 
         {view && <>
           <div className="trace-tools" aria-label="Preview tool">
-            {[['edit', MousePointer2, 'Edit'], ['hole', CircleDot, 'Add hole'], ['scale', Ruler, 'Scale points']].map(([id, Icon, label]) =>
+            {[['edit', MousePointer2, 'Edit'], ['hole', CircleDot, 'Add hole'], ['scale', Ruler, 'Scale points'], ['corners', Crop, 'Straighten']].map(([id, Icon, label]) =>
               <Button key={id} type="button" size="sm" variant="ghost" aria-pressed={tool === id} onClick={() => setTool(tool === id ? 'edit' : id)}><Icon size={14} /> {label}</Button>)}
           </div>
           <div className="trace-preview">
@@ -363,6 +414,22 @@ export function TracePanel({ trace, images, result, onChange, onLive, onImport, 
           </div>
           <p className="trace-hint">{hints[tool]}
             <span>{view.regions.length} {view.regions.length === 1 ? 'region' : 'regions'} · {pointCount} points{view.edited ? ' · edited' : ''}{size ? ' · ' + size.width.toFixed(1) + ' × ' + size.height.toFixed(1) + ' mm' : ''}</span></p>
+
+          {tool === 'corners' && <div className="trace-group trace-straighten">
+            <h4>Straighten photo <span className="trace-count">{corners.length}/4</span></h4>
+            <p className="trace-note">For a photo taken at an angle. The picked rectangle becomes the whole image, so pick corners around the part, such as the sheet it lies on.</p>
+            <div className="trace-scale-points">
+              <MmField label="Real width (mm)" value={rectangle.width} min={traceLimits.width[0]} max={traceLimits.width[1]} onCommit={(width) => setRectangle({ ...rectangle, width })} />
+              <MmField label="Real height (mm)" value={rectangle.height} min={traceLimits.width[0]} max={traceLimits.width[1]} onCommit={(height) => setRectangle({ ...rectangle, height })} />
+            </div>
+            <p className="trace-note">Optional. Both sizes give the exact proportions; the width also sets the scale. A4 is 210 × 297 mm.</p>
+            {straightenError && <p className="cad-error" role="alert">{straightenError}</p>}
+            <div className="cad-buttons">
+              <Button type="button" disabled={corners.length !== 4 || straightening} onClick={straighten}><Crop size={15} /> {straightening ? 'Straightening…' : 'Straighten'}</Button>
+              <Button type="button" variant="outline" disabled={!corners.length && !Number.isFinite(rectangle.width) && !Number.isFinite(rectangle.height)}
+                onClick={() => { setCorners([]); setRectangle({ width: NaN, height: NaN }) }}>Clear</Button>
+            </div>
+          </div>}
 
           <div className="trace-group">
             <h4>Outline</h4>
@@ -407,10 +474,10 @@ export function TracePanel({ trace, images, result, onChange, onLive, onImport, 
             <h4>Round holes <span className="trace-count">{circleHoles.length}</span></h4>
             {circleHoles.length > 0 && <ul className="trace-holes">
               {circleHoles.map(({ hole, regionIndex, loopIndex }, index) => <li key={regionIndex + '-' + loopIndex}>
-                <span>Hole {index + 1}</span>
-                <MmField compact label="Ø mm" value={scale ? hole.circle[2] * 2 * scale : NaN} min={0.1} max={traceLimits.width[1]}
-                  onCommit={(diameter) => scale && setViewState((current) => ({ ...current, edited: true,
-                    regions: editLoop(current.regions, { regionIndex, loopIndex }, (loop) => ({ circle: [loop.circle[0], loop.circle[1], diameter / 2 / scale] })) }), 'hole diameter')} />
+                <span title={hole.diameter ? 'Size is fixed in mm' : 'Size follows the image scale'}>Hole {index + 1}{hole.diameter ? '' : ' · traced'}</span>
+                <MmField compact label="Ø mm" value={hole.diameter ?? (scale ? hole.circle[2] * 2 * scale : NaN)} min={0.1} max={traceLimits.width[1]}
+                  onCommit={(diameter) => setViewState((current) => ({ ...current, edited: true,
+                    regions: editLoop(current.regions, { regionIndex, loopIndex }, (loop) => ({ circle: [loop.circle[0], loop.circle[1], scale ? diameter / 2 / scale : loop.circle[2]], diameter })) }), 'hole diameter')} />
                 <Button type="button" size="icon" variant="ghost" aria-label={'Remove hole ' + (index + 1)}
                   onClick={() => setViewState((current) => ({ ...current, edited: true, regions: editLoop(current.regions, { regionIndex, loopIndex }, () => null) }), 'removed hole')}><Trash2 size={14} /></Button>
               </li>)}
@@ -430,6 +497,10 @@ export function TracePanel({ trace, images, result, onChange, onLive, onImport, 
           </div>
           {trace.shape.mode === 'extrude' && !multi && <MmField label="Thickness (mm)" value={trace.shape.thickness} min={traceLimits.thickness[0]} max={traceLimits.thickness[1]}
             onCommit={(thickness) => setShape({ thickness }, 'thickness')} />}
+          {trace.shape.mode === 'extrude' && isRoundView(trace.views.top) && <div className="trace-suggest">
+            <p>The top view is round, so this looks like a turned part. Revolving the front view usually matches it more closely.</p>
+            <Button type="button" size="sm" variant="outline" onClick={() => setShape({ mode: 'revolve', axis: 50 }, 'solid type')}>Use revolve</Button>
+          </div>}
           {multi && <p className="trace-note">The solid is what the {[trace.views.front && 'front', trace.views.right?.regions.length && 'right', trace.views.top?.regions.length && 'top'].filter(Boolean).join(', ')} views share, each extruded straight through the part.</p>}
           {trace.shape.mode === 'revolve' && <>
             <label className="trace-range"><span>Axis position <output>{trace.shape.axis}% of front width</output></span>
