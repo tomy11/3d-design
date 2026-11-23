@@ -224,9 +224,11 @@ export async function createViewport(element, { onSelect, onSelectDrive, onChang
     outlinedMeshes = []
     if (workspace === 'service' && !measuring) {
       const piece = drive.nodes[servicePart]
+      drive.highlight(piece && effectivelyVisible(piece) ? servicePart : null)
       if (piece && effectivelyVisible(piece)) outlineMeshes(piece)
       return
     }
+    drive.highlight(null)
     if (measuring || workspace === 'pick' || workspace === 'cad') return
     const object = objects[id]
     if (!object || !effectivelyVisible(linkVisuals[id] ?? object)) return
@@ -240,7 +242,7 @@ export async function createViewport(element, { onSelect, onSelectDrive, onChang
 
   function outlineMeshes(visual) {
     visual.traverse((node) => {
-      if (!node.isMesh) return
+      if (!node.isMesh || node.userData.hitArea) return
       if (!edges.has(node.geometry)) edges.set(node.geometry, new T.EdgesGeometry(node.geometry, 55))
       const line = new T.LineSegments(edges.get(node.geometry), outlineMaterial)
       line.matrixAutoUpdate = false
@@ -277,7 +279,7 @@ export async function createViewport(element, { onSelect, onSelectDrive, onChang
     scene.updateMatrixWorld()
     const bounds = new T.Box3()
     object.traverse((node) => {
-      if (!node.isMesh || !effectivelyVisible(node)) return
+      if (!node.isMesh || node.userData.hitArea || !effectivelyVisible(node)) return
       if (!node.geometry.boundingBox) node.geometry.computeBoundingBox()
       bounds.union(node.geometry.boundingBox.clone().applyMatrix4(node.matrixWorld))
     })
@@ -346,7 +348,7 @@ export async function createViewport(element, { onSelect, onSelectDrive, onChang
     const pointer = new T.Vector2((event.clientX - rect.left) / rect.width * 2 - 1, 1 - (event.clientY - rect.top) / rect.height * 2)
     raycaster.setFromCamera(pointer, camera)
     const intersections = (object) => raycaster.intersectObject(object).find(({ object: hit, point }) =>
-      effectivelyVisible(hit) && (!renderer.clippingPlanes.length || sectionPlane.distanceToPoint(point) >= -0.000001))
+      effectivelyVisible(hit) && (!measuring || !hit.userData.hitArea) && (!renderer.clippingPlanes.length || sectionPlane.distanceToPoint(point) >= -0.000001))
     if (measuring) {
       const hit = intersections(workspace === 'cad' ? adapter : workspace === 'service' ? drive.root : plant)
       if (hit) markPoint(hit.point)
@@ -563,6 +565,7 @@ export async function createViewport(element, { onSelect, onSelectDrive, onChang
       observer.disconnect()
       orbit.dispose()
       gizmo.dispose()
+      drive.dispose()
       const materials = new Set([ghost])
       for (const value of externalMeshes.values()) for (const material of [value].flat()) materials.add(material)
       const geometries = new Set(edges.values())

@@ -119,6 +119,15 @@ export function makeDrive() {
     return register(group, id, moves, offset)
   }
   const piece = (object, id, offset) => register(object, id, pieceMoves, offset)
+  // Thin parts get a larger invisible twin so they are easy to click. It is never drawn or exported.
+  const hidden = new T.MeshBasicMaterial({ visible: false })
+  function hitArea(object, geometry) {
+    const proxy = new T.Mesh(geometry, hidden)
+    proxy.name = object.name + ' hit area'
+    proxy.userData.hitArea = true
+    object.add(proxy)
+    return object
+  }
   const layerOffsets = { motor: [0, 0, -0.046], gearbox: [0, 0, 0.082], wiring: [0.075, 0, 0] }
   const groups = Object.fromEntries(driveLayers.map(({ id }) => [id, assembly(root, id, layerMoves, layerOffsets[id])]))
 
@@ -142,6 +151,7 @@ export function makeDrive() {
   }
   const lamination = new T.BoxGeometry(0.009, 0.019, 0.051)
   const winding = new T.TorusGeometry(0.009, 0.0021, 8, 30)
+  const windingHit = new T.TorusGeometry(0.009, 0.0055, 6, 20)
   for (let index = 0; index < statorCount; index++) {
     const angle = index * Math.PI * 2 / statorCount
     const cos = Math.cos(angle)
@@ -153,8 +163,10 @@ export function makeDrive() {
     piece(mesh(segment, '', lamination, dark, x, y, -0.024), id + '-core').rotation.z = angle
     for (let loop = 0; loop < coilCount; loop++) {
       const spread = (loop - (coilCount - 1) / 2) * 0.012
-      piece(mesh(segment, '', winding, copper, x, y, -0.048 + loop * 0.014), id + '-coil-' + (loop + 1),
-        [cos * 0.026, sin * 0.026, spread]).rotation.z = angle
+      const coil = piece(mesh(segment, '', winding, copper, x, y, -0.048 + loop * 0.014), id + '-coil-' + (loop + 1),
+        [cos * 0.026, sin * 0.026, spread])
+      coil.rotation.z = angle
+      hitArea(coil, windingHit)
     }
   }
 
@@ -180,8 +192,9 @@ export function makeDrive() {
       [0.074 + offset, -0.015, -0.008], [0.071 + offset, 0.029, 0.009],
       [0.052 + offset, 0.062, 0.033], [0.023 + offset, 0.065, 0.035]]
     const curve = new T.CatmullRomCurve3(points.map((point) => new T.Vector3(...point)))
-    piece(mesh(wiring, '', new T.TubeGeometry(curve, 36, 0.00165, 10, false), metal(color, 0.03, 0.48)),
+    const lead = piece(mesh(wiring, '', new T.TubeGeometry(curve, 36, 0.00165, 10, false), metal(color, 0.03, 0.48)),
       'wire-lead-' + (index + 1), [(index - 1.5) * 0.014, 0, 0])
+    hitArea(lead, new T.TubeGeometry(curve, 24, 0.0045, 6, false))
   })
   piece(mesh(wiring, '', new T.BoxGeometry(0.023, 0.016, 0.014), insulation, 0.033, -0.053, -0.052), 'wire-plug-motor', [0, -0.03, -0.02])
   piece(mesh(wiring, '', new T.BoxGeometry(0.025, 0.016, 0.014), insulation, 0.021, 0.064, 0.036), 'wire-plug-feedback', [0, 0.03, 0.02])
@@ -206,14 +219,47 @@ export function makeDrive() {
     for (const { object, base, offset } of pieceMoves) object.position.copy(base).addScaledVector(offset, pieces)
   }
 
-  // Clone the drive fully assembled, whatever the current separation.
+  // Clone the drive fully assembled, whatever the current separation, without hit areas.
   function assembledClone() {
     const current = separation
+    const selected = litId
+    highlight(null)
     separate(0)
     const copy = root.clone()
     separate(current)
+    highlight(selected)
+    const proxies = []
+    copy.traverse((node) => { if (node.userData.hitArea) proxies.push(node) })
+    for (const proxy of proxies) proxy.removeFromParent()
     return copy
   }
 
-  return { root, groups, nodes, attach, separate, assembledClone }
+  // The selected piece glows. Each shared material gets one glowing twin, made on first use.
+  const glowing = new Map()
+  let lit = []
+  let litId = null
+  function highlight(id) {
+    litId = id
+    for (const [node, material] of lit) node.material = material
+    lit = []
+    nodes[id]?.traverse((node) => {
+      if (!node.isMesh || node.userData.hitArea) return
+      if (!glowing.has(node.material)) {
+        const twin = node.material.clone()
+        twin.emissive.set('#4d7cff')
+        twin.emissiveIntensity = 0.6
+        glowing.set(node.material, twin)
+      }
+      lit.push([node, node.material])
+      node.material = glowing.get(node.material)
+    })
+  }
+
+  function dispose() {
+    highlight(null)
+    for (const material of glowing.values()) material.dispose()
+    hidden.dispose()
+  }
+
+  return { root, groups, nodes, attach, separate, assembledClone, highlight, dispose }
 }
