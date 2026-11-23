@@ -1,4 +1,4 @@
-import { draw, makeCylinder, setOC } from 'replicad'
+import { draw, drawCircle, makeCylinder, setOC } from 'replicad'
 import initCascade from 'replicad-opencascadejs'
 import cascadeWasm from 'replicad-opencascadejs/wasm?url'
 import { validateAdapter } from './adapter-spec'
@@ -52,6 +52,20 @@ function outline(points) {
   return pen.close()
 }
 
+// A loop is { points } or a true circle { circle: [cx, cy, r] }.
+function drawLoop(loop) {
+  return loop.circle ? drawCircle(loop.circle[2]).translate(loop.circle[0], loop.circle[1]) : outline(loop.points)
+}
+
+function polygonOf(loop) {
+  if (!loop.circle) return loop.points
+  const [cx, cy, r] = loop.circle
+  return Array.from({ length: 96 }, (_, index) => {
+    const angle = index / 96 * Math.PI * 2
+    return [cx + r * Math.cos(angle), cy + r * Math.sin(angle)]
+  })
+}
+
 // Replaces solid with solid <op> tool and frees both inputs.
 function combine(solid, tool, op) {
   if (!solid) return tool
@@ -64,28 +78,63 @@ function combine(solid, tool, op) {
   }
 }
 
+// Each region is extruded from z0 for depth, with its holes cut clean through.
+function extrudeRegions(regions, z0, depth) {
+  let solid = null
+  for (const region of regions) {
+    let part = drawLoop(region.outer).sketchOnPlane('XY', z0).extrude(depth)
+    for (const hole of region.holes) part = combine(part, drawLoop(hole).sketchOnPlane('XY', z0 - 1).extrude(depth + 2), 'cut')
+    solid = combine(solid, part, 'fuse')
+  }
+  return solid
+}
+
+// Image axes of each view: front looks along -Z, right along -X, top along -Y.
+const viewTurns = { front: null, right: [90, [0, 1, 0]], top: [-90, [1, 0, 0]] }
+
+function revolveRegions(regions, axis) {
+  let solid = null
+  const body = (points) => outline(points).sketchOnPlane('XY').revolve([0, 1, 0], { origin: [0, 0, 0] })
+  for (const region of regions) {
+    const outer = clipToAxis(polygonOf(region.outer), axis)
+    if (outer.length < 3) continue
+    let part = body(outer)
+    for (const hole of region.holes) {
+      const cut = clipToAxis(polygonOf(hole), axis)
+      if (cut.length >= 3) part = combine(part, body(cut), 'cut')
+    }
+    solid = combine(solid, part, 'fuse')
+  }
+  if (!solid) throw new Error('Nothing of the outline lies on the right of the revolve axis.')
+  return solid
+}
+
+function extent(regions) {
+  let largest = 0
+  for (const { outer } of regions) {
+    for (const [x, y] of polygonOf(outer)) largest = Math.max(largest, Math.abs(x), Math.abs(y))
+  }
+  return largest
+}
+
 export async function runTrace(action, spec) {
   const error = validateTrace(spec)
   if (error) throw new Error(error)
   await init()
-  const { mode, thickness, axis } = spec
-  const body = (points, through) => mode === 'extrude'
-    ? outline(points).sketchOnPlane('XY', through ? -1 : 0).extrude(thickness + (through ? 2 : 0))
-    : outline(points).sketchOnPlane('XY').revolve([0, 1, 0], { origin: [0, 0, 0] })
-  const profile = (points) => mode === 'extrude' ? points : clipToAxis(points, axis)
   let solid = null
   try {
-    for (const region of spec.regions) {
-      const outer = profile(region.outer)
-      if (outer.length < 3) continue
-      let part = body(outer, false)
-      for (const hole of region.holes) {
-        const cut = profile(hole)
-        if (cut.length >= 3) part = combine(part, body(cut, true), 'cut')
+    if (spec.mode === 'revolve') solid = revolveRegions(spec.views.front, spec.axis)
+    else if (spec.mode === 'extrude') solid = extrudeRegions(spec.views.front, 0, spec.thickness)
+    else {
+      // Every view is extruded through the whole part, and the solid is what all of them share.
+      const reach = Math.max(...Object.values(spec.views).map(extent)) + 5
+      for (const [name, regions] of Object.entries(spec.views)) {
+        let block = extrudeRegions(regions, -reach, reach * 2)
+        if (viewTurns[name]) block = block.rotate(viewTurns[name][0], [0, 0, 0], viewTurns[name][1])
+        solid = combine(solid, block, 'intersect')
       }
-      solid = combine(solid, part, 'fuse')
     }
-    if (!solid) throw new Error('Nothing of the outline lies on the right of the revolve axis.')
+    if (!solid) throw new Error('The traced outline produced no solid.')
     return await output(action, solid)
   } finally {
     solid?.delete()

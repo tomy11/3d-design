@@ -7,7 +7,8 @@ use tauri::AppHandle;
 use tauri_plugin_dialog::DialogExt;
 use tempfile::NamedTempFile;
 
-const PROJECT_LIMIT: u64 = 1024 * 1024;
+// Projects can embed traced reference images.
+const PROJECT_LIMIT: u64 = 16 * 1024 * 1024;
 const STEP_LIMIT: usize = 20 * 1024 * 1024;
 
 fn write_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
@@ -26,7 +27,7 @@ fn read_project(path: &Path) -> Result<String, String> {
         .read_to_end(&mut bytes)
         .map_err(|err| format!("Could not read project: {err}"))?;
     if bytes.len() as u64 > PROJECT_LIMIT {
-        return Err("This project exceeds 1 MB.".into());
+        return Err("This project exceeds 16 MB.".into());
     }
     String::from_utf8(bytes).map_err(|_| "The project must use UTF-8.".into())
 }
@@ -50,7 +51,7 @@ async fn open_project(app: AppHandle) -> Result<Option<String>, String> {
 #[tauri::command]
 async fn save_project(app: AppHandle, document: String) -> Result<bool, String> {
     if document.len() as u64 > PROJECT_LIMIT {
-        return Err("This project exceeds 1 MB.".into());
+        return Err("This project exceeds 16 MB.".into());
     }
     let parsed: serde_json::Value =
         serde_json::from_str(&document).map_err(|_| "The project document is invalid JSON.")?;

@@ -1,9 +1,10 @@
 import { validateAdapter, adapterFields } from './adapter-spec'
 import { driveIds } from './drive'
+import { decodeTrace } from './trace-state'
 
 export const PROJECT_EXTENSION = 'assemblylab'
 export const desktop = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
-const maxBytes = 1024 * 1024
+const maxBytes = 16 * 1024 * 1024
 
 async function command(name, args) {
   const { invoke } = await import('@tauri-apps/api/core')
@@ -40,7 +41,7 @@ const vector = (item, length, limit = 1000) => Array.isArray(item) && item.lengt
   item.every((value) => Number.isFinite(value) && Math.abs(value) <= limit)
 
 export async function readBrowserProject(file) {
-  if (file.size > maxBytes) throw new Error('This project exceeds 1 MB.')
+  if (file.size > maxBytes) throw new Error('This project exceeds 16 MB.')
   return file.text()
 }
 
@@ -68,5 +69,8 @@ export function decodeProject(source, { modes, parts, joints }) {
     ['x', 'y', 'z'].includes(section.axis) && between(section.offset, -1500, 1500) && between(explosion, 0, 1), 'Invalid viewport settings.')
   clause(integer(service?.joint, 0, 5) && between(service.separation, 0, 1) &&
     id(service.part, driveIds) && ids(service.hidden, driveIds), 'Invalid service settings.')
-  return { ...document, adapter: Object.fromEntries(adapterFields.map(({ id: key }) => [key, adapter[key]])) }
+  // Traced parts were added later, so older projects have none.
+  clause(document.cadSource === undefined || ['adapter', 'trace'].includes(document.cadSource), 'Invalid CAD source.')
+  const traced = document.trace === undefined ? null : decodeTrace(document.trace)
+  return { ...document, traced, cadSource: document.cadSource ?? 'adapter', adapter: Object.fromEntries(adapterFields.map(({ id: key }) => [key, adapter[key]])) }
 }

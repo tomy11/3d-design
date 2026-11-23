@@ -366,3 +366,19 @@ kbd { font: 11px var(--mono); border: 1px solid var(--line); border-radius: 4px;
 .trace-mode { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; }
 .trace-note { margin: 0; color: var(--subtle); font-size: 12px; line-height: 1.4; }
 .cad-dimensions input[readonly] { color: var(--subtle); }
+.trace-views { grid-template-columns: repeat(3, 1fr); }
+.trace-views button { position: relative; }
+.trace-dot { position: absolute; top: 4px; right: 5px; width: 6px; height: 6px; border-radius: 50%; background: #4d7cff; }
+.trace-tools { display: flex; gap: 2px; flex-wrap: wrap; }
+.trace-tools button { font-size: 12px; gap: 5px; }
+.trace-tools button[aria-pressed="true"], .trace-scale-points button[aria-pressed="true"] { background: var(--selected); color: #dce6ff; }
+.mm-field { display: grid; gap: 5px; color: #c8d4e9; font-size: 12px; font-weight: 590; }
+.mm-field input { width: 100%; min-width: 0; height: 32px; padding-inline: 7px; border: 1px solid #3a465b; border-radius: 5px; background: #141924; color: var(--text); font: 13px var(--mono); }
+.mm-field.compact { grid-template-columns: auto 82px; align-items: center; gap: 6px; font-weight: 500; color: var(--subtle); }
+.mm-field.compact input { height: 28px; }
+.trace-scale-points { display: grid; grid-template-columns: 1fr auto; gap: 6px; align-items: end; }
+.trace-scale-points button { height: 32px; }
+.trace-holes { list-style: none; margin: 0; padding: 0; display: grid; gap: 3px; }
+.trace-holes li { display: flex; align-items: center; justify-content: space-between; gap: 6px; font-size: 12px; color: #c8d4e9; }
+.trace-count { margin-left: 4px; color: var(--subtle); font: 11px var(--mono); }
+.trace-warning { margin: 0; padding: 6px 8px; border-radius: 5px; background: #3a3020; color: #f1d7a8; font-size: 12px; line-height: 1.4; }

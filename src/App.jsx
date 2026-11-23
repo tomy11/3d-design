@@ -11,6 +11,8 @@ import { PickPanel, ServiceFooter, ServicePanels, TeachPanels, ToolFrame } from 
 import { gripperLicense, gripperSource } from './pick-cell'
 import { CadPanel, ViewPanel } from './CadPanel'
 import { TracePanel } from './TracePanel'
+import { imageFromDataUrl, loadTraceImage, traceToSpec } from './trace'
+import { createView, emptyTrace, serializeTrace, withView } from './trace-state'
 import { adapterDefaults } from './adapter-spec'
 import { runCad } from './adapter-client'
 import { decodeProject, desktop, openNativeProject, readBrowserProject, saveProject, saveStep } from './project-file'
@@ -230,6 +232,10 @@ export default function App() {
   const [cadError, setCadError] = useState('')
   const [cadSource, setCadSource] = useState('adapter')
   const [traceSpec, setTraceSpec] = useState(null)
+  const [trace, setTrace] = useState(emptyTrace)
+  const traceImages = useRef({})
+  const traceResult = useMemo(() => traceToSpec(trace), [trace])
+  const traceUpToDate = Boolean(traceSpec && traceResult.spec) && JSON.stringify(traceSpec) === JSON.stringify(traceResult.spec)
   const [stepExporting, setStepExporting] = useState(false)
   const [snap, setSnap] = useState(false)
   const [measure, setMeasure] = useState(false)
@@ -288,6 +294,7 @@ export default function App() {
     const undo = direction === 'undo'
     const value = undo ? change.before : change.after
     if (change.type === 'adapter') setDimensions(value)
+    if (change.type === 'trace') setTrace(value)
     if (change.type === 'transform') viewport.current?.restoreTransform(change.id, value)
     if (change.type === 'visibility') setHidden(value)
     if (change.type === 'taught') {
@@ -305,6 +312,23 @@ export default function App() {
     setDimensions(next)
   }
 
+  // before is passed when a drag already changed the state live and only needs recording.
+  function changeTrace(next, label, before = trace) {
+    recordChange({ type: 'trace', label, before, after: next })
+    setTrace(next)
+  }
+
+  async function importTraceImage(name, file) {
+    try {
+      const image = await loadTraceImage(file)
+      const id = 'img-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6)
+      traceImages.current[id] = image
+      changeTrace({ ...withView(trace, name, () => createView(image, id)), view: name }, 'traced image')
+    } catch (failure) {
+      setNotice('Could not import image. ' + (failure?.message ?? String(failure)))
+    }
+  }
+
   async function exportAdapter() {
     setStepExporting(true)
     try {
@@ -320,8 +344,17 @@ export default function App() {
     }
   }
 
-  function applyProject(source) {
+  async function applyProject(source) {
     const snapshot = decodeProject(source, { modes: modes.map(({ id }) => id), parts: Object.keys(parts), joints })
+    const loaded = {}
+    if (snapshot.traced) {
+      for (const [id, { name, url }] of Object.entries(snapshot.traced.images)) loaded[id] = await imageFromDataUrl(url, name)
+    }
+    traceImages.current = loaded
+    const nextTrace = snapshot.traced?.trace ?? emptyTrace
+    setTrace(nextTrace)
+    setTraceSpec(traceToSpec(nextTrace).spec ?? null)
+    setCadSource(snapshot.cadSource)
     setPlaying(false)
     setWorkspace(snapshot.workspace)
     setView('orbit')
@@ -361,7 +394,7 @@ export default function App() {
     setProjectBusy(true)
     try {
       const source = file ? await readBrowserProject(file) : await openNativeProject()
-      if (source !== null) applyProject(source)
+      if (source !== null) await applyProject(source)
     } catch (failure) {
       setNotice('Could not open project. ' + (failure?.message ?? String(failure)))
     } finally {
@@ -377,6 +410,7 @@ export default function App() {
         workspace, frame, pose, taught, adapter: dimensions, selected, hidden, isolated, expanded,
         grid, wireframe, snap, section, showAxes, explosion,
         service: { joint: serviceJoint, part: servicePart, hidden: serviceHidden, separation },
+        cadSource, trace: serializeTrace(trace, traceImages.current),
         ...viewport.current.captureScene(),
       })
       if (outcome) setNotice('Project saved.')
@@ -808,8 +842,9 @@ export default function App() {
               building={cadBuilding || !ready} exporting={stepExporting} error={cadError} />}
             {/* Stays mounted so the imported image and point edits survive switching modes. */}
             <div hidden={workspace !== 'cad' || cadSource !== 'trace'}>
-              <TracePanel onBuild={setTraceSpec} onExport={exportAdapter} building={cadBuilding || !ready} exporting={stepExporting}
-                error={cadSource === 'trace' ? cadError : ''} built={Boolean(traceSpec) && !cadBuilding && !cadError} />
+              <TracePanel trace={trace} images={traceImages.current} result={traceResult} onChange={changeTrace} onLive={setTrace} onImport={importTraceImage}
+                onBuild={() => setTraceSpec(traceResult.spec)} onExport={exportAdapter} building={cadBuilding || !ready} exporting={stepExporting}
+                error={cadSource === 'trace' ? cadError : ''} upToDate={traceUpToDate && !cadBuilding && !cadError} />
             </div>
             {(workspace === 'teach' || workspace === 'pick') && <ToolFrame values={toolValues} axes={showAxes} setAxes={setShowAxes} pick={workspace === 'pick'} />}
             {workspace === 'teach' && <TeachPanels {...{ pose, setJoint, frame, ready }} keys={taught} onSeek={(at) => { setPlaying(false); seek(at) }} onSave={savePose} onDelete={deletePose} />}

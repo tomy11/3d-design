@@ -1,30 +1,44 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
-import { Download, ImagePlus, RotateCcw, ScanLine } from 'lucide-react'
+import { useEffect, useRef, useState } from 'react'
+import { CircleDot, Download, ImagePlus, MousePointer2, Ruler, RotateCcw, ScanLine, Trash2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
-import { loadTraceImage, regionBounds, toMillimetres, traceImage } from './trace'
-import { traceLimits, validateTrace } from './trace-spec'
+import { loopContains, regionBounds, traceImage, viewLabels, viewNames, viewScale } from './trace'
+import { traceLimits } from './trace-spec'
+import { withView } from './trace-state'
 
 const grab = 8
 
-function hitVertex(regions, [x, y], radius) {
+// Every editable point of a view: loop vertices and circle centres.
+function handles(regions) {
+  const list = []
+  regions.forEach((region, regionIndex) => [region.outer, ...region.holes].forEach((loop, loopIndex) => {
+    if (loop.circle) list.push({ regionIndex, loopIndex, pointIndex: -1, at: loop.circle })
+    else loop.points.forEach((at, pointIndex) => list.push({ regionIndex, loopIndex, pointIndex, at }))
+  }))
+  return list
+}
+
+function nearestHandle(regions, [x, y], radius) {
   let best = null
-  regions.forEach((region, regionIndex) => [region.outer, ...region.holes].forEach((loop, loopIndex) => loop.forEach(([px, py], pointIndex) => {
-    const distance = Math.hypot(px - x, py - y)
-    if (distance <= radius && (!best || distance < best.distance)) best = { regionIndex, loopIndex, pointIndex, distance }
-  })))
+  for (const handle of handles(regions)) {
+    const distance = Math.hypot(handle.at[0] - x, handle.at[1] - y)
+    if (distance <= radius && (!best || distance < best.distance)) best = { ...handle, distance }
+  }
   return best
 }
 
-function hitSegment(regions, [x, y], radius) {
+function nearestSegment(regions, [x, y], radius) {
   let best = null
-  regions.forEach((region, regionIndex) => [region.outer, ...region.holes].forEach((loop, loopIndex) => loop.forEach((a, pointIndex) => {
-    const b = loop[(pointIndex + 1) % loop.length]
-    const dx = b[0] - a[0]
-    const dy = b[1] - a[1]
-    const t = Math.max(0, Math.min(1, ((x - a[0]) * dx + (y - a[1]) * dy) / (dx * dx + dy * dy || 1)))
-    const distance = Math.hypot(a[0] + t * dx - x, a[1] + t * dy - y)
-    if (distance <= radius && (!best || distance < best.distance)) best = { regionIndex, loopIndex, pointIndex, distance }
-  })))
+  regions.forEach((region, regionIndex) => [region.outer, ...region.holes].forEach((loop, loopIndex) => {
+    if (loop.circle) return
+    loop.points.forEach((a, pointIndex) => {
+      const b = loop.points[(pointIndex + 1) % loop.points.length]
+      const dx = b[0] - a[0]
+      const dy = b[1] - a[1]
+      const t = Math.max(0, Math.min(1, ((x - a[0]) * dx + (y - a[1]) * dy) / (dx * dx + dy * dy || 1)))
+      const distance = Math.hypot(a[0] + t * dx - x, a[1] + t * dy - y)
+      if (distance <= radius && (!best || distance < best.distance)) best = { regionIndex, loopIndex, pointIndex, distance }
+    })
+  }))
   return best
 }
 
@@ -32,102 +46,112 @@ function editLoop(regions, { regionIndex, loopIndex }, change) {
   return regions.map((region, r) => {
     if (r !== regionIndex) return region
     const loops = [region.outer, ...region.holes].map((loop, l) => l === loopIndex ? change(loop) : loop)
-    return { outer: loops[0], holes: loops.slice(1) }
+    return { outer: loops[0], holes: loops.slice(1).filter(Boolean) }
   })
 }
 
-export function TracePanel({ onBuild, onExport, building, exporting, error, built }) {
-  const [image, setImage] = useState(null)
-  const [loadError, setLoadError] = useState('')
-  const [settings, setSettings] = useState({ threshold: 128, invert: false, useAlpha: false, tolerance: 1.2, minArea: 40 })
-  const [regions, setRegions] = useState([])
-  const [edited, setEdited] = useState(false)
-  const [shape, setShape] = useState({ width: 100, mode: 'extrude', thickness: 10, axis: 50 })
-  const [lastBuilt, setLastBuilt] = useState(null)
+// A millimetre input that commits on Enter or blur, so typing makes one undo step.
+function MmField({ label, value, min, max, onCommit, compact = false }) {
+  const [draft, setDraft] = useState(null)
+  const shown = draft ?? (Number.isFinite(value) ? String(Math.round(value * 100) / 100) : '')
+  function commit() {
+    const number = Number(draft)
+    if (draft !== null && draft.trim() && Number.isFinite(number) && number >= min && number <= max) onCommit(number)
+    setDraft(null)
+  }
+  return (
+    <label className={compact ? 'mm-field compact' : 'mm-field'}><span>{label}</span>
+      <input type="number" inputMode="decimal" min={min} max={max} step="any" value={shown}
+        onChange={(event) => setDraft(event.target.value)} onBlur={commit}
+        onKeyDown={(event) => { if (event.key === 'Enter') event.target.blur(); if (event.key === 'Escape') { setDraft(null); event.target.blur() } }} />
+    </label>
+  )
+}
+
+export function TracePanel({ trace, images, result, onChange, onLive, onImport, onBuild, onExport, building, exporting, error, upToDate }) {
+  const name = trace.view
+  const view = trace.views[name]
+  const image = view ? images[view.imageId] : null
+  const scale = view ? viewScale(view) : null
+  const [tool, setTool] = useState('edit')
+  const [holeDiameter, setHoleDiameter] = useState(10)
   const canvas = useRef(null)
   const picture = useRef(null)
   const drag = useRef(null)
+  const live = useRef(null)
   const fileInput = useRef(null)
+  const redraw = useRef(null)
 
-  // Retrace whenever the image or trace settings change. This replaces manual point edits.
-  useEffect(() => {
-    if (!image) return
-    setRegions(traceImage(image, settings))
-    setEdited(false)
-  }, [image, settings])
+  useEffect(() => { setTool('edit') }, [name])
 
-  const spec = useMemo(() => {
-    const converted = toMillimetres(regions, shape.width)
-    if (!converted) return null
-    return {
-      mode: shape.mode,
-      thickness: shape.thickness,
-      axis: -shape.width / 2 + shape.width * shape.axis / 100,
-      regions: converted.regions,
-      height: converted.height,
-    }
-  }, [regions, shape])
-  const invalid = image ? (spec ? validateTrace(spec) : 'No outline found. Adjust the threshold or try Invert.') : null
-  const specKey = spec ? JSON.stringify(spec) : ''
-  const changed = specKey !== lastBuilt
-  const pointCount = regions.reduce((sum, region) => sum + region.outer.length + region.holes.reduce((n, hole) => n + hole.length, 0), 0)
+  const setViewState = (change, label) => onChange(withView(trace, name, change), label)
+  const setShape = (change, label) => onChange({ ...trace, shape: { ...trace.shape, ...change } }, label)
 
-  async function choose(file) {
-    if (!file) return
-    setLoadError('')
-    try {
-      const next = await loadTraceImage(file)
-      setSettings((current) => ({ ...current, threshold: next.autoThreshold, useAlpha: next.hasAlpha, invert: false }))
-      setImage(next)
-      setLastBuilt(null)
-    } catch (failure) {
-      setLoadError(failure?.message ?? String(failure))
-    }
+  // Sliders update live and record one undo step when released.
+  function slide(change) {
+    live.current ??= trace
+    onLive(withView(trace, name, (current) => change(current)))
   }
+  function release(label) {
+    if (!live.current) return
+    onChange(trace, label, live.current)
+    live.current = null
+  }
+  const retrace = (current, settings) => ({ ...current, settings, regions: traceImage(image, settings), edited: false })
+  const slider = (label) => ({ onPointerUp: () => release(label), onKeyUp: () => release(label), onBlur: () => release(label) })
 
   useEffect(() => {
+    picture.current = null
     if (!image) return
     const element = new Image()
-    element.onload = () => { picture.current = element; redraw.current() }
+    element.onload = () => { picture.current = element; redraw.current?.() }
     element.src = image.url
   }, [image])
 
-  // Image pixels per CSS pixel of the preview canvas.
   function toImage(event) {
     const rect = canvas.current.getBoundingClientRect()
-    const scale = image.width / rect.width
-    return { point: [(event.clientX - rect.left) * scale, (event.clientY - rect.top) * scale], scale }
+    const ratio = image.width / rect.width
+    return { point: [(event.clientX - rect.left) * ratio, (event.clientY - rect.top) * ratio], ratio }
   }
 
   function draw() {
     const element = canvas.current
     if (!element || !image) return
-    const ratio = window.devicePixelRatio || 1
+    const dpr = window.devicePixelRatio || 1
     const width = element.clientWidth
     const height = width * image.height / image.width
     element.style.height = height + 'px'
-    element.width = Math.round(width * ratio)
-    element.height = Math.round(height * ratio)
+    element.width = Math.round(width * dpr)
+    element.height = Math.round(height * dpr)
     const context = element.getContext('2d')
-    const scale = element.width / image.width
+    const zoom = element.width / image.width
+    const px = 1 / zoom
     context.setTransform(1, 0, 0, 1, 0, 0)
     context.fillStyle = '#ffffff'
     context.fillRect(0, 0, element.width, element.height)
     context.globalAlpha = 0.55
     if (picture.current) context.drawImage(picture.current, 0, 0, element.width, element.height)
     context.globalAlpha = 1
-    context.setTransform(scale, 0, 0, scale, 0, 0)
-    const pixel = 1 / scale
-    if (shape.mode === 'revolve') {
-      const bounds = regionBounds(regions)
+    context.setTransform(zoom, 0, 0, zoom, 0, 0)
+    const path = (loop) => {
+      if (loop.circle) {
+        context.moveTo(loop.circle[0] + loop.circle[2], loop.circle[1])
+        context.arc(loop.circle[0], loop.circle[1], loop.circle[2], 0, Math.PI * 2)
+      } else {
+        loop.points.forEach(([x, y], index) => context[index ? 'lineTo' : 'moveTo'](x, y))
+        context.closePath()
+      }
+    }
+    if (trace.shape.mode === 'revolve' && name === 'front') {
+      const bounds = regionBounds(view.regions)
       if (bounds) {
-        const x = bounds.minX + (bounds.maxX - bounds.minX) * shape.axis / 100
-        context.save()
+        const x = bounds.minX + (bounds.maxX - bounds.minX) * trace.shape.axis / 100
         context.fillStyle = 'rgba(20, 28, 40, 0.28)'
         context.fillRect(0, 0, x, image.height)
-        context.setLineDash([6 * pixel, 4 * pixel])
+        context.save()
+        context.setLineDash([6 * px, 4 * px])
         context.strokeStyle = '#e0526a'
-        context.lineWidth = 1.5 * pixel
+        context.lineWidth = 1.5 * px
         context.beginPath()
         context.moveTo(x, 0)
         context.lineTo(x, image.height)
@@ -135,138 +159,260 @@ export function TracePanel({ onBuild, onExport, building, exporting, error, buil
         context.restore()
       }
     }
-    regions.forEach((region) => {
+    for (const region of view.regions) {
       context.beginPath()
-      for (const loop of [region.outer, ...region.holes]) {
-        loop.forEach(([x, y], index) => context[index ? 'lineTo' : 'moveTo'](x, y))
-        context.closePath()
-      }
+      for (const loop of [region.outer, ...region.holes]) path(loop)
       context.fillStyle = 'rgba(77, 124, 255, 0.22)'
       context.fill('evenodd')
       ;[region.outer, ...region.holes].forEach((loop, index) => {
+        const color = loop.circle ? '#13a37a' : index ? '#ef8a3c' : '#2f6bff'
         context.beginPath()
-        loop.forEach(([x, y], n) => context[n ? 'lineTo' : 'moveTo'](x, y))
-        context.closePath()
-        context.strokeStyle = index ? '#ef8a3c' : '#2f6bff'
-        context.lineWidth = 1.6 * pixel
+        path(loop)
+        context.strokeStyle = color
+        context.lineWidth = 1.6 * px
         context.stroke()
-        context.fillStyle = index ? '#ef8a3c' : '#2f6bff'
-        for (const [x, y] of loop) {
+        context.fillStyle = color
+        for (const [x, y] of loop.circle ? [loop.circle] : loop.points) {
           context.beginPath()
-          context.arc(x, y, 2.3 * pixel, 0, Math.PI * 2)
+          context.arc(x, y, (loop.circle ? 3 : 2.3) * px, 0, Math.PI * 2)
           context.fill()
         }
       })
-    })
+    }
+    const marks = view.scale.mode === 'points' ? view.scale.points : []
+    if (marks.length) {
+      context.strokeStyle = '#d6336c'
+      context.fillStyle = '#d6336c'
+      context.lineWidth = 1.8 * px
+      if (marks.length === 2) {
+        context.beginPath()
+        context.moveTo(...marks[0])
+        context.lineTo(...marks[1])
+        context.stroke()
+      }
+      for (const [x, y] of marks) {
+        context.beginPath()
+        context.moveTo(x - 6 * px, y)
+        context.lineTo(x + 6 * px, y)
+        context.moveTo(x, y - 6 * px)
+        context.lineTo(x, y + 6 * px)
+        context.stroke()
+      }
+    }
   }
-
-  useEffect(draw)
-  const redraw = useRef(draw)
   redraw.current = draw
+  useEffect(draw)
   useEffect(() => {
-    const observer = new ResizeObserver(() => redraw.current())
+    const observer = new ResizeObserver(() => redraw.current?.())
     if (canvas.current) observer.observe(canvas.current)
     return () => observer.disconnect()
   }, [image])
 
   function pointerDown(event) {
-    if (event.button !== 0 || !regions.length) return
-    const { point, scale } = toImage(event)
-    const hit = hitVertex(regions, point, grab * scale)
+    if (event.button !== 0) return
+    const { point, ratio } = toImage(event)
+    if (tool === 'scale') {
+      const points = view.scale.points.length === 1 ? [view.scale.points[0], point] : [point]
+      setViewState((current) => ({ ...current, scale: { ...current.scale, mode: 'points', points } }), 'scale points')
+      if (points.length === 2) setTool('edit')
+      return
+    }
+    if (tool === 'hole') {
+      const region = view.regions.findIndex((item) => loopContains(item.outer, point) && !item.holes.some((hole) => loopContains(hole, point)))
+      if (region < 0) return
+      const radius = scale ? holeDiameter / 2 / scale : image.width * 0.03
+      setViewState((current) => ({
+        ...current,
+        edited: true,
+        regions: current.regions.map((item, index) => index === region ? { ...item, holes: [...item.holes, { circle: [point[0], point[1], radius] }] } : item),
+      }), 'added hole')
+      setTool('edit')
+      return
+    }
+    const hit = nearestHandle(view.regions, point, grab * ratio)
     if (!hit) return
     event.currentTarget.setPointerCapture(event.pointerId)
-    drag.current = hit
+    drag.current = { hit, before: trace, moved: false }
   }
 
   function pointerMove(event) {
-    const { point, scale } = toImage(event)
+    const { point, ratio } = toImage(event)
     if (!drag.current) {
-      event.currentTarget.style.cursor = hitVertex(regions, point, grab * scale) ? 'grab' : hitSegment(regions, point, grab * scale) ? 'copy' : 'crosshair'
+      event.currentTarget.style.cursor = tool !== 'edit' ? 'crosshair'
+        : nearestHandle(view.regions, point, grab * ratio) ? 'grab' : nearestSegment(view.regions, point, grab * ratio) ? 'copy' : 'default'
       return
     }
-    const clamped = [Math.max(0, Math.min(image.width, point[0])), Math.max(0, Math.min(image.height, point[1]))]
-    setRegions((current) => editLoop(current, drag.current, (loop) => loop.map((p, index) => index === drag.current.pointIndex ? clamped : p)))
-    setEdited(true)
+    const at = [Math.max(0, Math.min(image.width, point[0])), Math.max(0, Math.min(image.height, point[1]))]
+    const { hit } = drag.current
+    drag.current.moved = true
+    onLive(withView(trace, name, (current) => ({
+      ...current,
+      edited: true,
+      regions: editLoop(current.regions, hit, (loop) => loop.circle
+        ? { circle: [at[0], at[1], loop.circle[2]] }
+        : { points: loop.points.map((p, index) => index === hit.pointIndex ? at : p) }),
+    })))
+  }
+
+  function pointerUp() {
+    if (drag.current?.moved) onChange(trace, 'moved point', drag.current.before)
+    drag.current = null
   }
 
   function doubleClick(event) {
-    const { point, scale } = toImage(event)
-    if (hitVertex(regions, point, grab * scale)) return
-    const hit = hitSegment(regions, point, grab * scale)
+    if (tool !== 'edit') return
+    const { point, ratio } = toImage(event)
+    if (nearestHandle(view.regions, point, grab * ratio)) return
+    const hit = nearestSegment(view.regions, point, grab * ratio)
     if (!hit) return
-    setRegions((current) => editLoop(current, hit, (loop) => [...loop.slice(0, hit.pointIndex + 1), point, ...loop.slice(hit.pointIndex + 1)]))
-    setEdited(true)
+    setViewState((current) => ({
+      ...current,
+      edited: true,
+      regions: editLoop(current.regions, hit, (loop) => ({ points: [...loop.points.slice(0, hit.pointIndex + 1), point, ...loop.points.slice(hit.pointIndex + 1)] })),
+    }), 'added point')
   }
 
   function contextMenu(event) {
-    const { point, scale } = toImage(event)
-    const hit = hitVertex(regions, point, grab * scale)
+    const { point, ratio } = toImage(event)
+    const hit = nearestHandle(view.regions, point, grab * ratio)
     if (!hit) return
     event.preventDefault()
-    setRegions((current) => editLoop(current, hit, (loop) => loop.length > 3 ? loop.filter((_, index) => index !== hit.pointIndex) : loop))
-    setEdited(true)
+    setViewState((current) => ({
+      ...current,
+      edited: true,
+      regions: editLoop(current.regions, hit, (loop) => {
+        if (loop.circle) return hit.loopIndex ? null : loop
+        return loop.points.length > 3 ? { points: loop.points.filter((_, index) => index !== hit.pointIndex) } : loop
+      }),
+    }), 'removed point')
   }
 
-  const set = (key) => (event) => setSettings({ ...settings, [key]: event.target.type === 'checkbox' ? event.target.checked : Number(event.target.value) })
-  const setShapeValue = (key) => (event) => setShape({ ...shape, [key]: event.target.value === '' ? NaN : Number(event.target.value) })
+  const circleHoles = view ? view.regions.flatMap((region, regionIndex) => region.holes
+    .map((hole, holeIndex) => ({ hole, regionIndex, loopIndex: holeIndex + 1 })).filter(({ hole }) => hole.circle)) : []
+  const pointCount = view ? handles(view.regions).length : 0
+  const size = result.sizes?.[name]
+  const multi = trace.shape.mode === 'extrude' && (trace.views.right?.regions.length || trace.views.top?.regions.length)
+  const hints = {
+    edit: 'Drag a point or circle centre · double-click a line to add a point · right-click to remove.',
+    hole: 'Click inside the part to place a ' + holeDiameter + ' mm hole.',
+    scale: view?.scale.points.length === 1 ? 'Click the second point of a known distance.' : 'Click the first point of a known distance.',
+  }
 
   return (
     <section className="panel mode-panel">
       <div className="panel-heading mode-panel-title"><ScanLine size={16} /><h2>Trace from image</h2><span className="object-count">mm</span></div>
       <div className="mode-panel-body cad-form trace-form">
-        <input ref={fileInput} type="file" accept="image/*" hidden onChange={(event) => { choose(event.target.files?.[0]); event.target.value = '' }} />
-        <Button type="button" variant="outline" className="w-full" onClick={() => fileInput.current.click()}><ImagePlus size={15} /> {image ? 'Replace image' : 'Import image'}</Button>
-        {loadError && <p className="cad-error" role="alert">{loadError}</p>}
-        {!image && <p className="mode-copy">Use a straight-on photo, drawing or silhouette with the part on a plain background. Each image is traced as one view of the part.</p>}
-        {image && <>
+        <div className="section-axes trace-views" aria-label="Traced view">
+          {viewNames.map((item) => <Button key={item} type="button" size="sm" variant="outline" aria-pressed={item === name}
+            onClick={() => onLive({ ...trace, view: item })}>{viewLabels[item]}{trace.views[item] && <i className="trace-dot" aria-label="has image" />}</Button>)}
+        </div>
+        <input ref={fileInput} type="file" accept="image/*" hidden onChange={(event) => { const file = event.target.files?.[0]; if (file) onImport(name, file); event.target.value = '' }} />
+        <div className="cad-buttons">
+          <Button type="button" variant="outline" onClick={() => fileInput.current.click()}><ImagePlus size={15} /> {view ? 'Replace ' : 'Import '}{viewLabels[name].toLowerCase()} view</Button>
+          <Button type="button" variant="outline" aria-label={'Remove ' + viewLabels[name].toLowerCase() + ' view'} title="Remove this view" disabled={!view}
+            onClick={() => onChange(withView(trace, name, () => null), 'removed view')}><Trash2 size={15} /></Button>
+        </div>
+        {!view && <p className="mode-copy">{name === 'front'
+          ? 'Use a straight-on photo, drawing or silhouette on a plain background. The front view alone makes an extruded or revolved part.'
+          : 'Optional. Add a ' + name + ' view to carve the part from a second direction, like a three-view drawing.'}</p>}
+
+        {view && <>
+          <div className="trace-tools" aria-label="Preview tool">
+            {[['edit', MousePointer2, 'Edit'], ['hole', CircleDot, 'Add hole'], ['scale', Ruler, 'Scale points']].map(([id, Icon, label]) =>
+              <Button key={id} type="button" size="sm" variant="ghost" aria-pressed={tool === id} onClick={() => setTool(tool === id ? 'edit' : id)}><Icon size={14} /> {label}</Button>)}
+          </div>
           <div className="trace-preview">
             <canvas ref={canvas} aria-label={'Traced outline of ' + image.name} onPointerDown={pointerDown} onPointerMove={pointerMove}
-              onPointerUp={() => { drag.current = null }} onLostPointerCapture={() => { drag.current = null }}
-              onDoubleClick={doubleClick} onContextMenu={contextMenu} />
+              onPointerUp={pointerUp} onLostPointerCapture={pointerUp} onDoubleClick={doubleClick} onContextMenu={contextMenu} />
           </div>
-          <p className="trace-hint">Drag a point to move it · double-click a line to add one · right-click a point to remove it.
-            <span>{regions.length} {regions.length === 1 ? 'region' : 'regions'} · {pointCount} points{edited ? ' · edited' : ''}</span></p>
+          <p className="trace-hint">{hints[tool]}
+            <span>{view.regions.length} {view.regions.length === 1 ? 'region' : 'regions'} · {pointCount} points{view.edited ? ' · edited' : ''}{size ? ' · ' + size.width.toFixed(1) + ' × ' + size.height.toFixed(1) + ' mm' : ''}</span></p>
 
           <div className="trace-group">
             <h4>Outline</h4>
-            {image.hasAlpha && <label className="trace-check"><input type="checkbox" checked={settings.useAlpha} onChange={set('useAlpha')} /> Use transparency as the outline</label>}
-            {!settings.useAlpha && <label className="trace-range"><span>Threshold <output>{settings.threshold}</output></span>
-              <input type="range" min="1" max="254" value={settings.threshold} onChange={set('threshold')} /></label>}
-            <label className="trace-check"><input type="checkbox" checked={settings.invert} onChange={set('invert')} /> Invert (part is lighter than background)</label>
-            <label className="trace-range"><span>Detail <output>{settings.tolerance <= 0.8 ? 'Fine' : settings.tolerance >= 3 ? 'Coarse' : 'Medium'}</output></span>
-              <input type="range" min="0.4" max="6" step="0.1" value={6.4 - settings.tolerance} onChange={(event) => setSettings({ ...settings, tolerance: Math.round((6.4 - Number(event.target.value)) * 10) / 10 })} /></label>
-            <label className="trace-range"><span>Ignore specks under <output>{settings.minArea} px²</output></span>
-              <input type="range" min="0" max="2000" step="10" value={settings.minArea} onChange={set('minArea')} /></label>
-            {edited && <p className="trace-note">Changing these settings retraces the image and discards point edits.</p>}
+            {image.hasAlpha && <label className="trace-check"><input type="checkbox" checked={view.settings.useAlpha}
+              onChange={(event) => setViewState((current) => retrace(current, { ...current.settings, useAlpha: event.target.checked }), 'trace settings')} /> Use transparency as the outline</label>}
+            {!view.settings.useAlpha && <label className="trace-range"><span>Threshold <output>{view.settings.threshold}</output></span>
+              <input type="range" min="1" max="254" value={view.settings.threshold} {...slider('threshold')}
+                onChange={(event) => slide((current) => retrace(current, { ...current.settings, threshold: Number(event.target.value) }))} /></label>}
+            <label className="trace-check"><input type="checkbox" checked={view.settings.invert}
+              onChange={(event) => setViewState((current) => retrace(current, { ...current.settings, invert: event.target.checked }), 'trace settings')} /> Invert (part is lighter than background)</label>
+            <label className="trace-check"><input type="checkbox" checked={view.settings.circles}
+              onChange={(event) => setViewState((current) => retrace(current, { ...current.settings, circles: event.target.checked }), 'trace settings')} /> Snap round outlines to true circles</label>
+            <label className="trace-range"><span>Detail <output>{view.settings.tolerance <= 0.8 ? 'Fine' : view.settings.tolerance >= 3 ? 'Coarse' : 'Medium'}</output></span>
+              <input type="range" min="0.4" max="6" step="0.1" value={6.4 - view.settings.tolerance} {...slider('detail')}
+                onChange={(event) => slide((current) => retrace(current, { ...current.settings, tolerance: Math.round((6.4 - Number(event.target.value)) * 10) / 10 }))} /></label>
+            <label className="trace-range"><span>Ignore specks under <output>{view.settings.minArea} px²</output></span>
+              <input type="range" min="0" max="2000" step="10" value={view.settings.minArea} {...slider('speck size')}
+                onChange={(event) => slide((current) => retrace(current, { ...current.settings, minArea: Number(event.target.value) }))} /></label>
+            {view.edited && <p className="trace-note">Changing these settings retraces the image and replaces point and hole edits (undo brings them back).</p>}
           </div>
 
           <div className="trace-group">
-            <h4>Solid</h4>
-            <div className="section-axes trace-mode" aria-label="Solid type">
-              {[['extrude', 'Extrude'], ['revolve', 'Revolve']].map(([id, label]) =>
-                <Button key={id} type="button" size="sm" variant="outline" aria-pressed={shape.mode === id} onClick={() => setShape({ ...shape, mode: id })}>{label}</Button>)}
+            <h4>Scale</h4>
+            <div className="section-axes trace-mode" aria-label="Scale method">
+              {[['width', 'Overall width'], ['points', 'Two points']].map(([id, label]) =>
+                <Button key={id} type="button" size="sm" variant="outline" aria-pressed={view.scale.mode === id}
+                  onClick={() => { setViewState((current) => ({ ...current, scale: { ...current.scale, mode: id } }), 'scale method'); if (id === 'points' && view.scale.points.length < 2) setTool('scale') }}>{label}</Button>)}
             </div>
-            <div className="cad-dimensions">
-              <label><span>Real width (mm)</span><input type="number" inputMode="decimal" min={traceLimits.width[0]} max={traceLimits.width[1]} step="any" value={Number.isNaN(shape.width) ? '' : shape.width} onChange={setShapeValue('width')} /></label>
-              {shape.mode === 'extrude'
-                ? <label><span>Thickness (mm)</span><input type="number" inputMode="decimal" min={traceLimits.thickness[0]} max={traceLimits.thickness[1]} step="any" value={Number.isNaN(shape.thickness) ? '' : shape.thickness} onChange={setShapeValue('thickness')} /></label>
-                : <label><span>Height (mm)</span><input value={spec ? spec.height.toFixed(1) : '—'} readOnly tabIndex={-1} /></label>}
-            </div>
-            {shape.mode === 'extrude' && spec && <p className="trace-note">Height follows the image: {spec.height.toFixed(1)} mm.</p>}
-            {shape.mode === 'revolve' && <label className="trace-range"><span>Axis position <output>{shape.axis}% of width</output></span>
-              <input type="range" min="0" max="100" value={shape.axis} onChange={(event) => setShape({ ...shape, axis: Number(event.target.value) })} /></label>}
-            {shape.mode === 'revolve' && <p className="trace-note">The profile right of the red axis is spun a full turn around it. Shaded area is ignored.</p>}
+            {view.scale.mode === 'width'
+              ? <MmField label="Real width of the outline (mm)" value={view.scale.width} min={traceLimits.width[0]} max={traceLimits.width[1]}
+                onCommit={(width) => setViewState((current) => ({ ...current, scale: { ...current.scale, width } }), 'scale width')} />
+              : <div className="trace-scale-points">
+                <MmField label="Distance between points (mm)" value={view.scale.distance} min={traceLimits.width[0]} max={traceLimits.width[1]}
+                  onCommit={(distance) => setViewState((current) => ({ ...current, scale: { ...current.scale, distance } }), 'scale distance')} />
+                <Button type="button" size="sm" variant="outline" aria-pressed={tool === 'scale'} onClick={() => setTool(tool === 'scale' ? 'edit' : 'scale')}>
+                  <Ruler size={14} /> {view.scale.points.length === 2 ? 'Re-pick' : 'Pick'}</Button>
+              </div>}
+            <p className="trace-note">{scale ? (1 / scale).toFixed(2) + ' px per mm' : view.scale.mode === 'points' ? 'Pick two points on a known distance.' : 'Enter the real width.'}</p>
           </div>
 
-          {(invalid || error) && <p className="cad-error" role="alert">{invalid || error}</p>}
-          <div className="cad-buttons">
-            <Button type="button" disabled={Boolean(invalid) || building || !changed} onClick={() => { setLastBuilt(specKey); onBuild(spec) }}>{building ? 'Building…' : built && !changed ? 'Solid is up to date' : 'Build solid'}</Button>
-            <Button type="button" variant="outline" title="Retrace and discard point edits" aria-label="Retrace and discard point edits" disabled={!edited}
-              onClick={() => { setRegions(traceImage(image, settings)); setEdited(false) }}><RotateCcw size={15} /></Button>
+          <div className="trace-group">
+            <h4>Round holes <span className="trace-count">{circleHoles.length}</span></h4>
+            {circleHoles.length > 0 && <ul className="trace-holes">
+              {circleHoles.map(({ hole, regionIndex, loopIndex }, index) => <li key={regionIndex + '-' + loopIndex}>
+                <span>Hole {index + 1}</span>
+                <MmField compact label="Ø mm" value={scale ? hole.circle[2] * 2 * scale : NaN} min={0.1} max={traceLimits.width[1]}
+                  onCommit={(diameter) => scale && setViewState((current) => ({ ...current, edited: true,
+                    regions: editLoop(current.regions, { regionIndex, loopIndex }, (loop) => ({ circle: [loop.circle[0], loop.circle[1], diameter / 2 / scale] })) }), 'hole diameter')} />
+                <Button type="button" size="icon" variant="ghost" aria-label={'Remove hole ' + (index + 1)}
+                  onClick={() => setViewState((current) => ({ ...current, edited: true, regions: editLoop(current.regions, { regionIndex, loopIndex }, () => null) }), 'removed hole')}><Trash2 size={14} /></Button>
+              </li>)}
+            </ul>}
+            <div className="trace-scale-points">
+              <MmField label="New hole Ø (mm)" value={holeDiameter} min={0.1} max={traceLimits.width[1]} onCommit={setHoleDiameter} />
+              <Button type="button" size="sm" variant="outline" aria-pressed={tool === 'hole'} onClick={() => setTool(tool === 'hole' ? 'edit' : 'hole')}><CircleDot size={14} /> Place</Button>
+            </div>
           </div>
-          <Button type="button" className="w-full" variant="outline" disabled={!built || changed || building || exporting || Boolean(error)} onClick={onExport}><Download size={15} /> {exporting ? 'Preparing STEP…' : 'Export STEP solid'}</Button>
-          <p className="mode-copy">Traced dimensions come from the real width you enter. Check critical sizes against the part before fabrication.</p>
         </>}
+
+        <div className="trace-group">
+          <h4>Solid</h4>
+          <div className="section-axes trace-mode" aria-label="Solid type">
+            {[['extrude', multi ? 'Extrude views' : 'Extrude'], ['revolve', 'Revolve']].map(([id, label]) =>
+              <Button key={id} type="button" size="sm" variant="outline" aria-pressed={trace.shape.mode === id} onClick={() => setShape({ mode: id }, 'solid type')}>{label}</Button>)}
+          </div>
+          {trace.shape.mode === 'extrude' && !multi && <MmField label="Thickness (mm)" value={trace.shape.thickness} min={traceLimits.thickness[0]} max={traceLimits.thickness[1]}
+            onCommit={(thickness) => setShape({ thickness }, 'thickness')} />}
+          {multi && <p className="trace-note">The solid is what the {[trace.views.front && 'front', trace.views.right?.regions.length && 'right', trace.views.top?.regions.length && 'top'].filter(Boolean).join(', ')} views share, each extruded straight through the part.</p>}
+          {trace.shape.mode === 'revolve' && <>
+            <label className="trace-range"><span>Axis position <output>{trace.shape.axis}% of front width</output></span>
+              <input type="range" min="0" max="100" value={trace.shape.axis} onPointerDown={() => { live.current ??= trace }} {...slider('revolve axis')}
+                onChange={(event) => { live.current ??= trace; onLive({ ...trace, shape: { ...trace.shape, axis: Number(event.target.value) } }) }} /></label>
+            <p className="trace-note">Uses the front view. The profile right of the red axis is spun a full turn around it.</p>
+          </>}
+          {result.sizes && <p className="trace-note">{Object.entries(result.sizes).map(([item, value]) => viewLabels[item] + ' ' + value.width.toFixed(1) + ' × ' + value.height.toFixed(1)).join(' · ')} mm</p>}
+          {result.warnings?.map((warning) => <p key={warning} className="trace-warning">{warning} Check each view's scale.</p>)}
+        </div>
+
+        {(result.error || error) && <p className="cad-error" role="alert">{error || result.error}</p>}
+        <div className="cad-buttons">
+          <Button type="button" disabled={Boolean(result.error) || building || upToDate} onClick={onBuild}>{building ? 'Building…' : upToDate ? 'Solid is up to date' : 'Build solid'}</Button>
+          <Button type="button" variant="outline" title="Retrace this view and discard its edits" aria-label="Retrace this view and discard its edits" disabled={!view?.edited}
+            onClick={() => setViewState((current) => retrace(current, current.settings), 'retrace')}><RotateCcw size={15} /></Button>
+        </div>
+        <Button type="button" className="w-full" variant="outline" disabled={!upToDate || building || exporting || Boolean(error)} onClick={onExport}><Download size={15} /> {exporting ? 'Preparing STEP…' : 'Export STEP solid'}</Button>
+        <p className="mode-copy">Check critical sizes against the real part before fabrication.</p>
       </div>
     </section>
   )

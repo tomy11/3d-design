@@ -1,9 +1,15 @@
 // Image-to-outline tracing. Everything here works in image pixels (x right, y down)
 // until toMillimetres converts the traced regions into a CAD profile.
 
-export const maxTraceSize = 720
+// A traced loop is either { points: [[x, y], ...] } or a true circle { circle: [cx, cy, r] }.
+// Regions are [{ outer: loop, holes: [loop, ...] }].
 
-export async function loadTraceImage(file) {
+export const maxTraceSize = 720
+export const viewNames = ['front', 'right', 'top']
+export const viewLabels = { front: 'Front', right: 'Right', top: 'Top' }
+export const defaultTraceSettings = { threshold: 128, invert: false, useAlpha: false, tolerance: 1.2, minArea: 40, circles: true }
+
+export async function loadTraceImage(file, name = file.name) {
   if (!file.type.startsWith('image/')) throw new Error('Choose a PNG, JPEG, WebP or other image file.')
   const bitmap = await createImageBitmap(file)
   const scale = Math.min(1, maxTraceSize / Math.max(bitmap.width, bitmap.height))
@@ -16,7 +22,15 @@ export async function loadTraceImage(file) {
   context.drawImage(bitmap, 0, 0, width, height)
   bitmap.close()
   const pixels = context.getImageData(0, 0, width, height)
-  return { name: file.name, width, height, url: canvas.toDataURL('image/png'), ...analyse(pixels) }
+  const analysis = analyse(pixels)
+  // Kept small enough to embed in a project file: PNG only when transparency matters.
+  const url = analysis.hasAlpha ? canvas.toDataURL('image/png') : canvas.toDataURL('image/jpeg', 0.9)
+  return { name, width, height, url, ...analysis }
+}
+
+export async function imageFromDataUrl(url, name) {
+  const blob = await (await fetch(url)).blob()
+  return loadTraceImage(blob, name)
 }
 
 // Lightly blurred brightness and alpha, plus an automatic threshold.
@@ -217,11 +231,38 @@ export function groupRegions(loops, minArea) {
   return outers.map(({ outer, holes }) => ({ outer, holes }))
 }
 
+// Fits a circle to a dense pixel boundary. Returns [cx, cy, r] when the loop is round.
+export function fitCircle(loop) {
+  if (loop.length < 8) return null
+  const area = signedArea(loop)
+  let cx = 0
+  let cy = 0
+  for (let index = 0; index < loop.length; index++) {
+    const [x1, y1] = loop[index]
+    const [x2, y2] = loop[(index + 1) % loop.length]
+    const cross = x1 * y2 - x2 * y1
+    cx += (x1 + x2) * cross
+    cy += (y1 + y2) * cross
+  }
+  cx /= 6 * area
+  cy /= 6 * area
+  const radii = loop.map(([x, y]) => Math.hypot(x - cx, y - cy))
+  const r = radii.reduce((sum, value) => sum + value, 0) / radii.length
+  if (r < 3) return null
+  const deviation = Math.sqrt(radii.reduce((sum, value) => sum + (value - r) ** 2, 0) / radii.length)
+  const worst = Math.max(...radii.map((value) => Math.abs(value - r)))
+  const fill = Math.abs(area) / (Math.PI * r * r)
+  if (deviation > Math.max(0.035 * r, 0.6) || worst > Math.max(0.1 * r, 1.4) || fill < 0.92 || fill > 1.08) return null
+  return [round(cx), round(cy), round(r)]
+}
+
 export function traceImage(image, settings) {
   const mask = makeMask(image, settings)
   const loops = traceLoops(mask, image.width, image.height)
   const regions = groupRegions(loops, settings.minArea)
   const simplify = (loop) => {
+    const circle = settings.circles ? fitCircle(loop) : null
+    if (circle) return { circle }
     let tolerance = settings.tolerance
     let result = simplifyLoop(loop, tolerance)
     // Keep each loop small enough for the CAD kernel.
@@ -229,31 +270,98 @@ export function traceImage(image, settings) {
       tolerance *= 1.5
       result = simplifyLoop(loop, tolerance)
     }
-    return result
+    return { points: result }
   }
-  return regions.map(({ outer, holes }) => ({ outer: simplify(outer), holes: holes.map(simplify).filter((hole) => hole.length >= 3) }))
+  return regions.map(({ outer, holes }) => ({
+    outer: simplify(outer),
+    holes: holes.map(simplify).filter((hole) => hole.circle || hole.points.length >= 3),
+  }))
+}
+
+// Extents of a loop, true circles included.
+function loopExtents(loop) {
+  if (loop.circle) {
+    const [cx, cy, r] = loop.circle
+    return [cx - r, cy - r, cx + r, cy + r]
+  }
+  const xs = loop.points.map(([x]) => x)
+  const ys = loop.points.map(([, y]) => y)
+  return [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)]
 }
 
 export function regionBounds(regions) {
-  const xs = regions.flatMap(({ outer }) => outer.map(([x]) => x))
-  const ys = regions.flatMap(({ outer }) => outer.map(([, y]) => y))
-  if (!xs.length) return null
-  return { minX: Math.min(...xs), maxX: Math.max(...xs), minY: Math.min(...ys), maxY: Math.max(...ys) }
+  if (!regions?.length) return null
+  const all = regions.map(({ outer }) => loopExtents(outer))
+  return {
+    minX: Math.min(...all.map((e) => e[0])), minY: Math.min(...all.map((e) => e[1])),
+    maxX: Math.max(...all.map((e) => e[2])), maxY: Math.max(...all.map((e) => e[3])),
+  }
 }
 
-// Converts pixel regions to millimetres, centred on the shape, y up.
-export function toMillimetres(regions, widthMm) {
-  const bounds = regionBounds(regions)
-  if (!bounds || bounds.maxX <= bounds.minX) return null
-  const scale = widthMm / (bounds.maxX - bounds.minX)
+export function loopContains(loop, point) {
+  if (loop.circle) return Math.hypot(point[0] - loop.circle[0], point[1] - loop.circle[1]) <= loop.circle[2]
+  return pointInLoop(point, loop.points)
+}
+
+// Millimetres per image pixel: from two picked points and their real distance, or the overall width.
+export function viewScale(view) {
+  const { scale } = view
+  if (scale.mode === 'points' && scale.points.length === 2 && scale.distance > 0) {
+    const pixels = Math.hypot(scale.points[1][0] - scale.points[0][0], scale.points[1][1] - scale.points[0][1])
+    return pixels > 0 ? scale.distance / pixels : null
+  }
+  const bounds = regionBounds(view.regions)
+  return bounds && bounds.maxX > bounds.minX && scale.width > 0 ? scale.width / (bounds.maxX - bounds.minX) : null
+}
+
+// Converts one view's pixel regions to millimetres, centred on the outline, y up.
+export function viewToMillimetres(view) {
+  const bounds = regionBounds(view.regions)
+  const scale = viewScale(view)
+  if (!bounds || !scale) return null
   const cx = (bounds.minX + bounds.maxX) / 2
   const cy = (bounds.minY + bounds.maxY) / 2
-  const convert = (loop) => loop.map(([x, y]) => [round((x - cx) * scale), round((cy - y) * scale)])
+  const point = ([x, y]) => [round((x - cx) * scale), round((cy - y) * scale)]
+  const convert = (loop) => loop.circle
+    ? { circle: [...point(loop.circle), round(loop.circle[2] * scale)] }
+    : { points: loop.points.map(point) }
   return {
-    regions: regions.map(({ outer, holes }) => ({ outer: convert(outer), holes: holes.map(convert) })),
-    width: widthMm,
+    regions: view.regions.map(({ outer, holes }) => ({ outer: convert(outer), holes: holes.map(convert) })),
+    width: round((bounds.maxX - bounds.minX) * scale),
     height: round((bounds.maxY - bounds.minY) * scale),
   }
+}
+
+// Builds the kernel spec from the whole trace state. Returns { spec, sizes, warnings } or { error }.
+export function traceToSpec(trace) {
+  const { shape } = trace
+  const converted = Object.fromEntries(viewNames
+    .filter((name) => trace.views[name]?.regions.length)
+    .map((name) => [name, viewToMillimetres(trace.views[name])]))
+  if (!trace.views.front) return { error: 'Import a front view image to start.' }
+  if (!converted.front) return { error: trace.views.front.regions.length ? 'Set the scale of the front view.' : 'No outline found in the front view. Adjust the threshold or try Invert.' }
+  for (const name of viewNames) {
+    if (trace.views[name]?.regions.length && !converted[name]) return { error: 'Set the scale of the ' + name + ' view.' }
+  }
+  const sizes = Object.fromEntries(Object.entries(converted).map(([name, value]) => [name, { width: value.width, height: value.height }]))
+  const multi = shape.mode === 'extrude' && (converted.right || converted.top)
+  const warnings = []
+  if (multi) {
+    const compare = (a, b, label) => {
+      if (a !== undefined && b !== undefined && Math.abs(a - b) > 0.03 * Math.max(a, b)) {
+        warnings.push(label + ' differ: ' + a.toFixed(1) + ' mm and ' + b.toFixed(1) + ' mm.')
+      }
+    }
+    compare(sizes.front?.height, sizes.right?.height, 'Front and right heights')
+    compare(sizes.front?.width, sizes.top?.width, 'Front and top widths')
+    compare(sizes.right?.width, sizes.top?.height, 'Right width and top depth')
+  }
+  const spec = shape.mode === 'revolve'
+    ? { mode: 'revolve', axis: round(-sizes.front.width / 2 + sizes.front.width * shape.axis / 100), views: { front: converted.front.regions } }
+    : multi
+      ? { mode: 'views', views: Object.fromEntries(Object.entries(converted).map(([name, value]) => [name, value.regions])) }
+      : { mode: 'extrude', thickness: shape.thickness, views: { front: converted.front.regions } }
+  return { spec, sizes, warnings }
 }
 
 const round = (value) => Math.round(value * 1000) / 1000
