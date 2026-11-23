@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import {
   Box, Boxes, ChevronDown, ChevronRight, CircleHelp, Download, Eye, EyeOff,
   Focus, Maximize2, Minimize2, PanelRight, PanelBottom, FolderOpen, Magnet, Redo2, Ruler, Save, Scissors, Undo2, Grid2X2, Layers3, Expand, Maximize, MousePointer2, Move, Pause, Play, RotateCcw,
@@ -15,7 +15,7 @@ import { imageFromDataUrl, loadTraceImage, traceToSpec } from './trace'
 import { createView, emptyTrace, serializeTrace, withView } from './trace-state'
 import { loadMesh, placeMesh, renderSilhouettes } from './mesh-reference'
 import { Matrix4, Vector3 } from 'three'
-import { adapterDefaults } from './adapter-spec'
+import { createAdapterCommands } from './adapter-commands'
 import { runCad } from './adapter-client'
 import { decodeProject, desktop, openNativeProject, readBrowserProject, saveProject, saveStep } from './project-file'
 import { createViewport } from './viewport'
@@ -229,10 +229,16 @@ export default function App() {
   const [, setHistoryVersion] = useState(0)
   const [projectBusy, setProjectBusy] = useState(false)
   const [sceneRestore, setSceneRestore] = useState(null)
-  const [dimensions, setDimensions] = useState(adapterDefaults)
-  const [cadBuilding, setCadBuilding] = useState(false)
+  const [adapterCommands] = useState(() => createAdapterCommands({
+    runCad,
+    onEdit: (before, after) => recordChange({ type: 'adapter', label: 'adapter dimensions', before, after }),
+  }))
+  const { revision: adapterRevision, dimensions, mesh: adapterMesh, building: adapterBuilding } =
+    useSyncExternalStore(adapterCommands.subscribe, adapterCommands.getSnapshot)
+  const [cadMeshBuilding, setCadMeshBuilding] = useState(false)
   const [cadError, setCadError] = useState('')
   const [cadSource, setCadSource] = useState('adapter')
+  const cadBuilding = cadMeshBuilding || (cadSource === 'adapter' && adapterBuilding)
   const [traceSpec, setTraceSpec] = useState(null)
   const [trace, setTrace] = useState(emptyTrace)
   const traceImages = useRef({})
@@ -295,12 +301,13 @@ export default function App() {
   }
 
   function moveHistory(direction) {
+    if (adapterCommands.getSnapshot().building) return
     const from = history.current[direction]
     const change = from.pop()
     if (!change) return
     const undo = direction === 'undo'
     const value = undo ? change.before : change.after
-    if (change.type === 'adapter') setDimensions(value)
+    if (change.type === 'adapter') adapterCommands.restore(value)
     if (change.type === 'trace') setTrace(value)
     if (change.type === 'transform') viewport.current?.restoreTransform(change.id, value)
     if (change.type === 'visibility') setHidden(value)
@@ -314,9 +321,12 @@ export default function App() {
     setNotice((undo ? 'Undid ' : 'Redid ') + change.label + '.')
   }
 
-  function applyDimensions(next) {
-    recordChange({ type: 'adapter', label: 'adapter dimensions', before: dimensions, after: next })
-    setDimensions(next)
+  async function applyDimensions(next) {
+    try {
+      await adapterCommands.set_adapter_dimensions({ dimensions: next, expected_revision: adapterRevision })
+    } catch (failure) {
+      setNotice(failure?.message ?? String(failure))
+    }
   }
 
   // before is passed when a drag already changed the state live and only needs recording.
@@ -401,7 +411,7 @@ export default function App() {
     setStepExporting(true)
     try {
       const tracing = cadSource === 'trace'
-      const document = tracing ? await runCad('step', traceSpec, 'trace') : await runCad('step', dimensions)
+      const document = tracing ? await runCad('step', traceSpec, 'trace') : await runCad('step', adapterCommands.get_body().dimensions)
       if (await saveStep(document, tracing ? 'traced-part.step' : 'flange-adapter.step')) {
         setNotice(tracing ? 'Traced part exported as STEP.' : 'Flange adapter exported as STEP.')
       }
@@ -432,7 +442,7 @@ export default function App() {
     setTaught(snapshot.taught)
     setOverrides(Object.fromEntries(snapshot.pose.map((angle, index) => [index, angle])))
     setServicePose(snapshot.pose)
-    setDimensions(snapshot.adapter)
+    adapterCommands.restore(snapshot.adapter)
     setExpanded(snapshot.expanded)
     setSelected(snapshot.selected)
     setHidden(snapshot.hidden)
@@ -471,11 +481,11 @@ export default function App() {
   }
 
   async function writeProject() {
-    if (projectBusy || !ready) return
+    if (projectBusy || !ready || adapterCommands.getSnapshot().building) return
     setProjectBusy(true)
     try {
       const outcome = await saveProject({
-        workspace, frame, pose, taught, adapter: dimensions, selected, hidden, isolated, expanded,
+        workspace, frame, pose, taught, adapter: adapterCommands.get_body().dimensions, selected, hidden, isolated, expanded,
         grid, wireframe, snap, section, showAxes, explosion,
         service: { joint: serviceJoint, part: servicePart, hidden: serviceHidden, separation },
         cadSource, trace: serializeTrace(trace, traceImages.current),
@@ -674,20 +684,26 @@ export default function App() {
     const tracing = cadSource === 'trace'
     if (tracing && !traceSpec) {
       viewport.current?.setAdapter({ positions: new Float32Array(), normals: new Float32Array(), indices: new Uint32Array() })
-      setCadBuilding(false)
+      setCadMeshBuilding(false)
       return
     }
-    setCadBuilding(true)
     viewport.current?.refitAdapter()
-    ;(tracing ? runCad('mesh', traceSpec, 'trace') : runCad('mesh', dimensions)).then((mesh) => {
+    if (!tracing && adapterMesh) {
+      viewport.current?.setAdapter(adapterMesh)
+      setCadMeshBuilding(false)
+      return
+    }
+    setCadMeshBuilding(true)
+    const build = tracing ? runCad('mesh', traceSpec, 'trace') : runCad('mesh', dimensions)
+    build.then((mesh) => {
       if (current) viewport.current?.setAdapter(mesh)
     }).catch((failure) => {
       if (current) setCadError('Open CASCADE could not rebuild the solid. ' + (failure?.message ?? String(failure)))
     }).finally(() => {
-      if (current) setCadBuilding(false)
+      if (current) setCadMeshBuilding(false)
     })
     return () => { current = false }
-  }, [ready, workspace, dimensions, cadSource, traceSpec])
+  }, [ready, workspace, dimensions, adapterMesh, cadSource, traceSpec])
 
   useEffect(() => {
     if (!playing) return
@@ -797,7 +813,7 @@ export default function App() {
               if (file) openProject(file)
             }} />
             <IconButton label="Open project" disabled={!ready || projectBusy} onClick={() => openProject()}><FolderOpen size={17} /></IconButton>
-            <IconButton label="Save project" disabled={!ready || projectBusy} onClick={writeProject}><Save size={17} /></IconButton>
+            <IconButton label="Save project" disabled={!ready || projectBusy || adapterBuilding} onClick={writeProject}><Save size={17} /></IconButton>
             <span className="header-divider action-divider" />
             <IconButton label="Controls" onClick={() => dialog.current.showModal()}><CircleHelp size={17} /></IconButton>
             <IconButton label={fullscreen ? 'Exit fullscreen' : 'Enter fullscreen'} aria-pressed={fullscreen} onClick={toggleFullscreen}>
@@ -836,8 +852,8 @@ export default function App() {
               <div className="viewport-header">
                 <div className="viewport-title"><Box size={15} /><h2>3D Viewport</h2></div>
                 <div className="viewport-actions">
-                  <IconButton label="Undo" onClick={() => moveHistory('undo')} disabled={!history.current.undo.length}><Undo2 size={16} /></IconButton>
-                  <IconButton label="Redo" onClick={() => moveHistory('redo')} disabled={!history.current.redo.length}><Redo2 size={16} /></IconButton>
+                  <IconButton label="Undo" onClick={() => moveHistory('undo')} disabled={adapterBuilding || !history.current.undo.length}><Undo2 size={16} /></IconButton>
+                  <IconButton label="Redo" onClick={() => moveHistory('redo')} disabled={adapterBuilding || !history.current.redo.length}><Redo2 size={16} /></IconButton>
                   <span className="vertical-rule" />
                   <IconButton label="Snap transforms" aria-pressed={snap} onClick={() => setSnap(!snap)} title="Snap move 5 mm, rotate 5°, scale 0.1"><Magnet size={16} /></IconButton>
                   <IconButton label="Measure distance" aria-pressed={measure} onClick={() => { if (!measure) showInspector(); setMeasure(!measure) }}><Ruler size={16} /></IconButton>

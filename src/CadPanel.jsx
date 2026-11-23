@@ -12,18 +12,18 @@ export function CadPanel({ dimensions, onApply, onExport, building, exporting, e
   return (
     <section className="panel mode-panel">
       <div className="panel-heading mode-panel-title"><Box size={16} /><h2>Flange adapter</h2><span className="object-count">mm</span></div>
-      <form className="mode-panel-body cad-form" onSubmit={(event) => { event.preventDefault(); if (!invalid && changed) onApply(values) }} noValidate>
+      <form className="mode-panel-body cad-form" onSubmit={(event) => { event.preventDefault(); if (!invalid && changed && !building) onApply(values) }} noValidate>
         <div className="cad-dimensions">
           {adapterFields.map(({ id, label, min, max, integer }) => <label key={id}>
             <span>{label}</span>
-            <input type="number" inputMode={integer ? 'numeric' : 'decimal'} value={draft[id]} min={min} max={max}
+            <input type="number" inputMode={integer ? 'numeric' : 'decimal'} value={draft[id]} disabled={building} min={min} max={max}
               step={integer ? 1 : 'any'} onChange={(event) => setDraft({ ...draft, [id]: event.target.value })} />
           </label>)}
         </div>
         {(invalid || error) && <p className="cad-error" role="alert">{invalid || error}</p>}
         <div className="cad-buttons">
           <Button type="submit" disabled={Boolean(invalid) || !changed || building}>{building ? 'Building…' : 'Rebuild solid'}</Button>
-          <Button type="button" variant="outline" title="Restore example dimensions" aria-label="Restore example dimensions" onClick={() => setDraft(adapterDefaults)}><RotateCcw size={15} /></Button>
+          <Button type="button" variant="outline" title="Restore example dimensions" aria-label="Restore example dimensions" disabled={building} onClick={() => setDraft(adapterDefaults)}><RotateCcw size={15} /></Button>
         </div>
         <Button type="button" className="w-full" variant="outline" disabled={changed || building || exporting || Boolean(error)} onClick={onExport}><Download size={15} /> {exporting ? 'Preparing STEP…' : 'Export STEP solid'}</Button>
         <p className="mode-copy">Example part with editable dimensions. Confirm the bolt pattern against your hardware before fabrication.</p>
