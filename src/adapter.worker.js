@@ -1,8 +1,8 @@
-import { runAdapter } from './adapter-kernel'
+import { runAdapter, runTrace } from './adapter-kernel'
 
-self.onmessage = async ({ data: { id, action, dimensions } }) => {
+self.onmessage = async ({ data: { id, kind, action, payload } }) => {
   try {
-    const value = await runAdapter(action, dimensions)
+    const value = await (kind === 'trace' ? runTrace : runAdapter)(action, payload)
     const transfer = typeof value === 'string' ? [] : Object.values(value).map((array) => array.buffer)
     self.postMessage({ id, value }, transfer)
   } catch (error) {

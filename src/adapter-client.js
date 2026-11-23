@@ -3,12 +3,13 @@ let nextId = 0
 let workerUnavailable = false
 const pending = new Map()
 
-function local(action, dimensions) {
-  return import('./adapter-kernel').then(({ runAdapter }) => runAdapter(action, dimensions))
+function local(action, payload, kind) {
+  return import('./adapter-kernel').then((kernel) => (kind === 'trace' ? kernel.runTrace : kernel.runAdapter)(action, payload))
 }
 
-export function runCad(action, dimensions) {
-  if (workerUnavailable) return local(action, dimensions)
+// kind is 'adapter' (payload: flange dimensions) or 'trace' (payload: traced profile spec).
+export function runCad(action, payload, kind = 'adapter') {
+  if (workerUnavailable) return local(action, payload, kind)
   if (!worker) {
     try {
       worker = new Worker(new URL('./adapter.worker.js', import.meta.url), { type: 'module' })
@@ -23,17 +24,17 @@ export function runCad(action, dimensions) {
         event.preventDefault()
         workerUnavailable = true
         worker.terminate()
-        for (const job of pending.values()) local(job.action, job.dimensions).then(job.resolve, job.reject)
+        for (const job of pending.values()) local(job.action, job.payload, job.kind).then(job.resolve, job.reject)
         pending.clear()
       }
     } catch {
       workerUnavailable = true
-      return local(action, dimensions)
+      return local(action, payload, kind)
     }
   }
   return new Promise((resolve, reject) => {
     const id = ++nextId
-    pending.set(id, { action, dimensions, resolve, reject })
-    worker.postMessage({ id, action, dimensions })
+    pending.set(id, { action, payload, kind, resolve, reject })
+    worker.postMessage({ id, kind, action, payload })
   })
 }

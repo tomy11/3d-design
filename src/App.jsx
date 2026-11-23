@@ -10,6 +10,7 @@ import { fps, persistTaughtProgram, pickProgram, readTaughtProgram, sampleProgra
 import { PickPanel, ServiceFooter, ServicePanels, TeachPanels, ToolFrame } from './ModePanels'
 import { gripperLicense, gripperSource } from './pick-cell'
 import { CadPanel, ViewPanel } from './CadPanel'
+import { TracePanel } from './TracePanel'
 import { adapterDefaults } from './adapter-spec'
 import { runCad } from './adapter-client'
 import { decodeProject, desktop, openNativeProject, readBrowserProject, saveProject, saveStep } from './project-file'
@@ -227,6 +228,8 @@ export default function App() {
   const [dimensions, setDimensions] = useState(adapterDefaults)
   const [cadBuilding, setCadBuilding] = useState(false)
   const [cadError, setCadError] = useState('')
+  const [cadSource, setCadSource] = useState('adapter')
+  const [traceSpec, setTraceSpec] = useState(null)
   const [stepExporting, setStepExporting] = useState(false)
   const [snap, setSnap] = useState(false)
   const [measure, setMeasure] = useState(false)
@@ -305,7 +308,11 @@ export default function App() {
   async function exportAdapter() {
     setStepExporting(true)
     try {
-      if (await saveStep(await runCad('step', dimensions))) setNotice('Flange adapter exported as STEP.')
+      const tracing = cadSource === 'trace'
+      const document = tracing ? await runCad('step', traceSpec, 'trace') : await runCad('step', dimensions)
+      if (await saveStep(document, tracing ? 'traced-part.step' : 'flange-adapter.step')) {
+        setNotice(tracing ? 'Traced part exported as STEP.' : 'Flange adapter exported as STEP.')
+      }
     } catch (failure) {
       setNotice(failure?.message ?? String(failure))
     } finally {
@@ -561,8 +568,15 @@ export default function App() {
     if (!ready || workspace !== 'cad') return
     let current = true
     setCadError('')
+    const tracing = cadSource === 'trace'
+    if (tracing && !traceSpec) {
+      viewport.current?.setAdapter({ positions: new Float32Array(), normals: new Float32Array(), indices: new Uint32Array() })
+      setCadBuilding(false)
+      return
+    }
     setCadBuilding(true)
-    runCad('mesh', dimensions).then((mesh) => {
+    viewport.current?.refitAdapter()
+    ;(tracing ? runCad('mesh', traceSpec, 'trace') : runCad('mesh', dimensions)).then((mesh) => {
       if (current) viewport.current?.setAdapter(mesh)
     }).catch((failure) => {
       if (current) setCadError('Open CASCADE could not rebuild the solid. ' + (failure?.message ?? String(failure)))
@@ -570,7 +584,7 @@ export default function App() {
       if (current) setCadBuilding(false)
     })
     return () => { current = false }
-  }, [ready, workspace, dimensions])
+  }, [ready, workspace, dimensions, cadSource, traceSpec])
 
   useEffect(() => {
     if (!playing) return
@@ -671,7 +685,7 @@ export default function App() {
           <div className="header-divider" />
           <div className="document-title">
             <span className="document-type">{isCad ? 'PART DESIGN' : 'ROBOT WORKCELL'}</span>
-            <h1>{isCad ? 'Flange Adapter Workbench' : 'UR10e Collaborative Robot'}</h1>
+            <h1>{isCad ? (cadSource === 'trace' ? 'Traced Part Workbench' : 'Flange Adapter Workbench') : 'UR10e Collaborative Robot'}</h1>
           </div>
           <div className="header-actions">
             <input ref={fileInput} type="file" hidden accept=".assemblylab,application/json" onChange={(event) => {
@@ -686,7 +700,7 @@ export default function App() {
             <IconButton label={fullscreen ? 'Exit fullscreen' : 'Enter fullscreen'} aria-pressed={fullscreen} onClick={toggleFullscreen}>
               {fullscreen ? <Minimize2 size={16} /> : <Maximize2 size={16} />}
             </IconButton>
-            <Button variant="outline" aria-label={workspace === 'cad' ? 'Export STEP' : 'Export GLB'} onClick={workspace === 'cad' ? exportAdapter : exportScene} disabled={!ready || exporting || (workspace === 'cad' && (cadBuilding || stepExporting || Boolean(cadError)))} className="export-button"><Download size={16} /><span>{exporting || stepExporting ? 'Exporting…' : workspace === 'cad' ? 'Export STEP' : 'Export GLB'}</span></Button>
+            <Button variant="outline" aria-label={workspace === 'cad' ? 'Export STEP' : 'Export GLB'} onClick={workspace === 'cad' ? exportAdapter : exportScene} disabled={!ready || exporting || (workspace === 'cad' && (cadBuilding || stepExporting || Boolean(cadError) || (cadSource === 'trace' && !traceSpec)))} className="export-button"><Download size={16} /><span>{exporting || stepExporting ? 'Exporting…' : workspace === 'cad' ? 'Export STEP' : 'Export GLB'}</span></Button>
           </div>
         </div>
       </header>
@@ -786,8 +800,17 @@ export default function App() {
           />}
           <aside className="sidebar" aria-label="Workbench inspector" hidden={!inspectorVisible}>
             {showViewportPanel && <ViewPanel measure={measure} result={measurement} clearMeasurement={() => viewport.current?.clearMeasurement()} section={section} setSection={setSection} />}
-            {workspace === 'cad' && <CadPanel dimensions={dimensions} onApply={applyDimensions} onExport={exportAdapter}
+            {workspace === 'cad' && <div className="cad-source section-axes" aria-label="Part source">
+              {[['adapter', 'Flange adapter'], ['trace', 'Trace image']].map(([id, label]) =>
+                <Button key={id} size="sm" variant="outline" aria-pressed={cadSource === id} onClick={() => setCadSource(id)}>{label}</Button>)}
+            </div>}
+            {workspace === 'cad' && cadSource === 'adapter' && <CadPanel dimensions={dimensions} onApply={applyDimensions} onExport={exportAdapter}
               building={cadBuilding || !ready} exporting={stepExporting} error={cadError} />}
+            {/* Stays mounted so the imported image and point edits survive switching modes. */}
+            <div hidden={workspace !== 'cad' || cadSource !== 'trace'}>
+              <TracePanel onBuild={setTraceSpec} onExport={exportAdapter} building={cadBuilding || !ready} exporting={stepExporting}
+                error={cadSource === 'trace' ? cadError : ''} built={Boolean(traceSpec) && !cadBuilding && !cadError} />
+            </div>
             {(workspace === 'teach' || workspace === 'pick') && <ToolFrame values={toolValues} axes={showAxes} setAxes={setShowAxes} pick={workspace === 'pick'} />}
             {workspace === 'teach' && <TeachPanels {...{ pose, setJoint, frame, ready }} keys={taught} onSeek={(at) => { setPlaying(false); seek(at) }} onSave={savePose} onDelete={deletePose} />}
             {workspace === 'pick' && <PickPanel frame={frame} seek={(at) => { setPlaying(false); seek(at) }} />}

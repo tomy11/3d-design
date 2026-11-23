@@ -30,9 +30,9 @@ export async function saveProject(project) {
   return true
 }
 
-export async function saveStep(document) {
-  if (desktop) return command('save_step', { document })
-  download(document, 'flange-adapter.step', 'model/step')
+export async function saveStep(document, name = 'flange-adapter.step') {
+  if (desktop) return command('save_step', { document, name })
+  download(document, name, 'model/step')
   return true
 }
 

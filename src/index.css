@@ -350,3 +350,19 @@ kbd { font: 11px var(--mono); border: 1px solid var(--line); border-radius: 4px;
 .drive-tree { margin: -4px -7px 0; padding-top: 0; }
 .drive-swatch { width: 10px; height: 10px; flex-shrink: 0; border-radius: 3px; }
 .drive-path { margin: 8px 0 10px; color: var(--subtle); font-size: 12px; line-height: 1.4; }
+
+.cad-source { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; flex-shrink: 0; }
+.trace-form { gap: 10px; }
+.trace-preview { border: 1px solid #3a465b; border-radius: 6px; overflow: hidden; background: #fff; }
+.trace-preview canvas { display: block; width: 100%; touch-action: none; }
+.trace-hint { margin: -2px 0 0; color: var(--subtle); font-size: 12px; line-height: 1.4; }
+.trace-hint span { display: block; margin-top: 2px; font-family: var(--mono); font-size: 11px; color: #a8b7d3; }
+.trace-group { display: grid; gap: 8px; padding-top: 10px; border-top: 1px solid var(--rule); }
+.trace-group h4 { margin: 0; color: #d2ddf0; font-size: 12px; font-weight: 650; letter-spacing: .04em; text-transform: uppercase; }
+.trace-range { display: grid; gap: 4px; color: #c8d4e9; font-size: 12px; font-weight: 590; }
+.trace-range span { display: flex; justify-content: space-between; gap: 8px; }
+.trace-range output { color: #a8b7d3; font: 11px var(--mono); }
+.trace-check { display: flex; align-items: center; gap: 7px; color: #c8d4e9; font-size: 12px; }
+.trace-mode { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; }
+.trace-note { margin: 0; color: var(--subtle); font-size: 12px; line-height: 1.4; }
+.cad-dimensions input[readonly] { color: var(--subtle); }

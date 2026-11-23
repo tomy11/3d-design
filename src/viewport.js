@@ -402,6 +402,9 @@ export async function createViewport(element, { onSelect, onSelectDrive, onChang
     focus,
     toolReadout,
     clearMeasurement,
+    refitAdapter() {
+      fittingAdapter = true
+    },
     setAdapter({ positions, normals, indices }) {
       const geometry = new T.BufferGeometry()
       geometry.setAttribute('position', new T.BufferAttribute(positions, 3))

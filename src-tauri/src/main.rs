@@ -69,7 +69,7 @@ async fn save_project(app: AppHandle, document: String) -> Result<bool, String> 
 }
 
 #[tauri::command]
-async fn save_step(app: AppHandle, document: String) -> Result<bool, String> {
+async fn save_step(app: AppHandle, document: String, name: Option<String>) -> Result<bool, String> {
     if document.len() > STEP_LIMIT || !document.starts_with("ISO-10303-21;") {
         return Err("The generated STEP document is invalid.".into());
     }
@@ -77,7 +77,11 @@ async fn save_step(app: AppHandle, document: String) -> Result<bool, String> {
         &app,
         "STEP solid",
         "step",
-        "flange-adapter.step",
+        // Only known default names are accepted from the page.
+        match name.as_deref() {
+            Some("traced-part.step") => "traced-part.step",
+            _ => "flange-adapter.step",
+        },
         document.as_bytes(),
     )
 }
