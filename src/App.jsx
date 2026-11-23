@@ -1,8 +1,6 @@
-import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
+import { Suspense, lazy, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import {
-  Box, Boxes, ChevronDown, ChevronRight, CircleHelp, Download, Eye, EyeOff,
-  Focus, Maximize2, Minimize2, PanelRight, PanelBottom, FolderOpen, Magnet, Redo2, Ruler, Save, Scissors, Undo2, Grid2X2, Layers3, Expand, Maximize, MousePointer2, Move, Pause, Play, RotateCcw,
-  RotateCw, ScanLine, SkipBack, SkipForward, SlidersHorizontal, Wrench, X,
+  Box, Boxes, CircleHelp, Download, Focus, Maximize2, Minimize2, PanelRight, PanelBottom, FolderOpen, Magnet, Redo2, Ruler, Save, Scissors, Undo2, Grid2X2, Layers3, Expand, Maximize, MousePointer2, Move, Pause, Play, RotateCcw, RotateCw, ScanLine, SlidersHorizontal, Wrench, X,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { hierarchy, joints, keyframes, licenseUrl, meshCount, sourceUrl } from './robot'
@@ -10,16 +8,16 @@ import { fps, persistTaughtProgram, pickProgram, readTaughtProgram, sampleProgra
 import { PickPanel, ServiceFooter, ServicePanels, TeachPanels, ToolFrame } from './ModePanels'
 import { gripperLicense, gripperSource } from './pick-cell'
 import { CadPanel, ViewPanel } from './CadPanel'
-import { TracePanel } from './TracePanel'
-import { imageFromDataUrl, loadTraceImage, meshTraceSize, traceToSpec } from './trace'
-import { createView, emptyTrace, serializeTrace, withView } from './trace-state'
-import { loadMesh, placeMesh, renderSilhouettes } from './mesh-reference'
-import { Matrix4, Vector3 } from 'three'
+import { IconButton, Inspector, SceneTree, Timeline, parts, visibleParts } from './InspectPanels'
+import { useTraceWorkbench } from './useTraceWorkbench'
 import { createAdapterCommands } from './adapter-commands'
 import { useDesktopMcp } from './desktop-mcp'
 import { runCad } from './adapter-client'
 import { decodeProject, desktop, openNativeProject, readBrowserProject, saveProject, saveStep } from './project-file'
 import { createViewport } from './viewport'
+
+// The trace workbench (image tracing, straightening, mesh tools) loads the first time it is opened.
+const TracePanel = lazy(() => import('./TracePanel').then((module) => ({ default: module.TracePanel })))
 
 const tools = [
   { id: 'select', icon: MousePointer2, label: 'Select', key: 'V' },
@@ -40,180 +38,6 @@ const modes = [
   { id: 'service', label: 'Service Mode', compact: 'Service', icon: Wrench },
   { id: 'cad', label: 'CAD', icon: SlidersHorizontal },
 ]
-
-function indexTree(nodes, parents = []) {
-  const entries = nodes.flatMap((node) => [
-    [node.id, { ...node, parents }],
-    ...indexTree(node.children ?? [], [...parents, node.id]),
-  ])
-  return entries
-}
-
-const parts = Object.fromEntries(indexTree(hierarchy))
-
-function visibleParts(hidden, isolated) {
-  return new Set(Object.values(parts).filter(({ id, parents }) => {
-    if (isolated) return id === isolated || parents.includes(isolated) || parts[isolated].parents.includes(id)
-    return !hidden.includes(id) && parents.every((parent) => !hidden.includes(parent))
-  }).map(({ id }) => id))
-}
-
-function IconButton({ label, children, className, ...props }) {
-  return <Button size="icon" variant="ghost" aria-label={label} title={label} className={className} {...props}>{children}</Button>
-}
-
-function SceneTree({ nodes, level = 0, selected, expanded, hidden, visible, onSelect, onExpand, onVisibility }) {
-  return (
-    <ul className="scene-list">
-      {nodes.map((node) => {
-        const open = expanded.includes(node.id)
-        const concealed = hidden.includes(node.id)
-        const shown = visible.has(node.id)
-        const PartIcon = node.children ? (node.id === 'robot' ? Boxes : Layers3) : Box
-        return (
-          <li key={node.id}>
-            <div className={`tree-row ${selected === node.id ? 'selected' : ''} ${shown ? '' : 'concealed'}`} style={{ '--depth': level }}>
-              {node.children
-                ? <IconButton label={`${open ? 'Collapse' : 'Expand'} ${node.name}`} className="tree-toggle" aria-expanded={open} onClick={() => onExpand(node.id)}>{open ? <ChevronDown /> : <ChevronRight />}</IconButton>
-                : <span className="tree-spacer" />}
-              <button className="tree-label" onClick={() => onSelect(node.id)} aria-pressed={selected === node.id}>
-                <PartIcon size={14} /><span>{node.name}</span>{node.joint && <span className="joint-tag">{node.joint}</span>}
-              </button>
-              <IconButton label={`${concealed ? 'Show' : 'Hide'} ${node.name}`} className="tree-eye" onClick={() => onVisibility(node.id)}>
-                {concealed ? <EyeOff /> : <Eye />}
-              </IconButton>
-            </div>
-            {node.children && open && <SceneTree nodes={node.children} level={level + 1} {...{ selected, expanded, hidden, visible, onSelect, onExpand, onVisibility }} />}
-          </li>
-        )
-      })}
-    </ul>
-  )
-}
-
-function NumberField({ value, axis, name, onCommit }) {
-  const [draft, setDraft] = useState(null)
-  const canceled = useRef(false)
-  const display = value.toFixed(2)
-  return (
-    <label className="number-field">
-      <span className={`axis axis-${axis}`}>{axis.toUpperCase()}</span>
-      <input aria-label={`${name} ${axis.toUpperCase()}`} inputMode="decimal" value={draft ?? display}
-        onFocus={(event) => { canceled.current = false; event.target.select() }}
-        onChange={(event) => setDraft(event.target.value)}
-        onBlur={() => {
-          const parsed = Number(draft)
-          if (!canceled.current && draft?.trim() && Number.isFinite(parsed)) onCommit(parsed)
-          setDraft(null)
-        }}
-        onKeyDown={(event) => {
-          if (event.key === 'Enter') event.target.blur()
-          if (event.key === 'Escape') {
-            canceled.current = true
-            event.target.blur()
-          }
-        }}
-      />
-    </label>
-  )
-}
-
-function Inspector({ selected, transform, viewport, pose, setJoint, isolated, setIsolated, onSelect }) {
-  const part = parts[selected]
-  const jointId = part?.joint ?? (part?.sourceName ? parts[part.parents.at(-1)].joint : null)
-  const jointIndex = joints.findIndex(({ joint }) => joint === jointId)
-  const joint = joints[jointIndex]
-  const angle = pose[jointIndex]
-  const isIsolated = isolated === selected
-  return (
-    <section className="panel inspector">
-      <div className="panel-heading"><SlidersHorizontal size={16} /><h2>Properties</h2></div>
-      {selected && transform ? (
-        <div className="properties" key={selected}>
-          <div className="object-heading">
-            <span className="object-icon"><Box size={17} /></span>
-            <div><h3>{part.name}</h3><p>{part.sourceName ?? (part.joint ? part.joint + ' · Revolute joint' : 'Object3D')}</p></div>
-            {selected !== 'robot' && <IconButton className="isolate-button" label={isIsolated ? 'Show entire robot' : 'Isolate selected part'} aria-pressed={isIsolated} onClick={() => setIsolated(isIsolated ? null : selected)}><Focus size={16} /></IconButton>}
-          </div>
-          {joint && <div className="joint-control">
-            <div className="joint-control-heading"><label htmlFor="joint-angle">{joint.joint} joint angle</label><output htmlFor="joint-angle">{angle.toFixed(1)}°</output></div>
-            <input id="joint-angle" type="range" min={-joint.limit} max={joint.limit} step="0.5" value={angle} onChange={(event) => setJoint(jointIndex, Number(event.target.value))} />
-            <div className="joint-range"><span>{-joint.limit}°</span><span>{joint.limit}°</span></div>
-          </div>}
-          <details className="transform-details">
-          <summary>Free transform</summary>
-          <div className="section-line">
-            <h4>Local coordinates</h4>
-            <IconButton label="Reset selected transform" onClick={() => viewport.current?.reset(selected)}><RotateCcw size={14} /></IconButton>
-          </div>
-          {[['position', 'Location', 'm'], ['rotation', 'Rotation', '°'], ['scale', 'Scale', null]].map(([type, label, unit]) => (
-            <div className="transform-group" key={type}>
-              <div className="field-label">{label}{unit && <span>{unit}</span>}</div>
-              <div className="number-grid">
-                {['x', 'y', 'z'].map((axis, index) =>
-                  <NumberField key={axis} axis={axis} name={label} value={transform[type][index]} onCommit={(value) => viewport.current?.write(selected, type, axis, value)} />
-                )}
-              </div>
-            </div>
-          ))}
-          </details>
-          {part.children && selected !== 'robot' && <div className="component-shortcuts">
-            <h4>CAD components</h4>
-            <div>{part.children.map((child) => <Button key={child.id} size="sm" variant="outline" onClick={() => onSelect(child.id)} aria-label={'Inspect ' + child.name}>{child.name}</Button>)}</div>
-          </div>}
-        </div>
-      ) : <p className="empty-properties">Select a part in the viewport or scene hierarchy to edit its transform.</p>}
-    </section>
-  )
-}
-
-function Timeline({ frame, playing, setFrame, setPlaying, lastFrame, markers, trackName, canPlay }) {
-  const track = useRef(null)
-  function seek(event) {
-    const rect = track.current.getBoundingClientRect()
-    setFrame(Math.max(0, Math.min(lastFrame, Math.round((event.clientX - rect.left) / rect.width * lastFrame))))
-  }
-  return (
-    <section className="panel timeline">
-      <div className="timeline-heading">
-        <div className="panel-heading"><ScanLine size={16} /><h2>Timeline</h2></div>
-        <div className="playback">
-          <IconButton label="First frame" onClick={() => { setPlaying(false); setFrame(0) }}><SkipBack size={14} /></IconButton>
-          <IconButton label={playing ? 'Pause joint motion' : 'Play joint motion'} className="mini-play" disabled={!canPlay} onClick={() => setPlaying(!playing)}>{playing ? <Pause size={15} fill="currentColor" /> : <Play size={15} fill="currentColor" />}</IconButton>
-          <IconButton label="Last frame" onClick={() => { setPlaying(false); setFrame(lastFrame) }}><SkipForward size={14} /></IconButton>
-        </div>
-        <div className="frame-count"><strong>{String(frame).padStart(3, '0')}</strong> / {lastFrame}<span>{fps} FPS</span></div>
-      </div>
-      <div className="timeline-content">
-        <span className="track-label">{trackName}</span>
-        <div className={`ruler ${markers.length > 6 ? 'dense-ruler' : ''}`} ref={track}>
-          <div className="ruler-scrub" role="slider" tabIndex={0} aria-label="Animation frame" aria-valuemin={0} aria-valuemax={lastFrame} aria-valuenow={frame} aria-valuetext={`Frame ${frame}`}
-            onPointerDown={(event) => {
-              event.currentTarget.setPointerCapture(event.pointerId)
-              setPlaying(false)
-              seek(event)
-            }}
-            onPointerMove={(event) => { if (event.currentTarget.hasPointerCapture(event.pointerId)) seek(event) }}
-            onKeyDown={(event) => {
-              const changes = { ArrowLeft: frame - 1, ArrowRight: frame + 1, Home: 0, End: lastFrame }
-              if (!(event.key in changes)) return
-              event.preventDefault()
-              setPlaying(false)
-              setFrame(Math.max(0, Math.min(lastFrame, changes[event.key])))
-            }}
-          />
-          {markers.map((item) => (
-            <div key={item.frame} className="keyframe" style={{ left: `${item.frame / lastFrame * 100}%` }}>
-              <span>{item.frame}</span>
-              <button aria-label={`${item.name}, frame ${item.frame}`} title={item.name} onClick={() => { setPlaying(false); setFrame(item.frame) }}><i /></button>
-            </div>
-          ))}
-          <div className="playhead" style={{ left: `${frame / lastFrame * 100}%` }} />
-        </div>
-      </div>
-    </section>
-  )
-}
 
 export default function App() {
   const mount = useRef(null)
@@ -241,16 +65,6 @@ export default function App() {
   const [cadError, setCadError] = useState('')
   const [cadSource, setCadSource] = useState('adapter')
   const cadBuilding = cadMeshBuilding || (cadSource === 'adapter' && adapterBuilding)
-  const [traceSpec, setTraceSpec] = useState(null)
-  const [trace, setTrace] = useState(emptyTrace)
-  const traceImages = useRef({})
-  // Reference mesh: the loaded file, its 90° turns, and the size shown in millimetres.
-  const meshBase = useRef(null)
-  const meshTurn = useRef(new Matrix4())
-  const meshPlaced = useRef(null)
-  const [mesh, setMesh] = useState(null)
-  const traceResult = useMemo(() => traceToSpec(trace), [trace])
-  const traceUpToDate = Boolean(traceSpec && traceResult.spec) && JSON.stringify(traceSpec) === JSON.stringify(traceResult.spec)
   const [stepExporting, setStepExporting] = useState(false)
   const [snap, setSnap] = useState(false)
   const [measure, setMeasure] = useState(false)
@@ -282,6 +96,11 @@ export default function App() {
   const [playing, setPlaying] = useState(false)
   const [exporting, setExporting] = useState(false)
   const [notice, setNotice] = useState('')
+  const traced = useTraceWorkbench({ viewport, recordChange, setNotice })
+  const { traceSpec, mesh } = traced
+  // Stays mounted once opened so the imported image and point edits survive switching modes.
+  const [traceOpened, setTraceOpened] = useState(false)
+  if (workspace === 'cad' && cadSource === 'trace' && !traceOpened) setTraceOpened(true)
   const rotateMcpProjectId = useDesktopMcp(ready, adapterCommands, setNotice, {
     get_scene: () => ({ revision: editRevision.current, ...viewport.current.sceneReadout(cadSource) }),
     get_robot_pose: () => ({ revision: editRevision.current, ...viewport.current.robotPoseReadout() }),
@@ -315,7 +134,7 @@ export default function App() {
     const undo = direction === 'undo'
     const value = undo ? change.before : change.after
     if (change.type === 'adapter') adapterCommands.restore(value)
-    if (change.type === 'trace') setTrace(value)
+    if (change.type === 'trace') traced.setTrace(value)
     if (change.type === 'transform') viewport.current?.restoreTransform(change.id, value)
     if (change.type === 'visibility') setHidden(value)
     if (change.type === 'taught') {
@@ -337,93 +156,6 @@ export default function App() {
     }
   }
 
-  // before is passed when a drag already changed the state live and only needs recording.
-  function changeTrace(next, label, before = trace) {
-    recordChange({ type: 'trace', label, before, after: next })
-    setTrace(next)
-  }
-
-  function placeReference(longest, visible) {
-    const placed = placeMesh(meshBase.current, meshTurn.current, longest)
-    meshPlaced.current?.dispose()
-    meshPlaced.current = placed.geometry
-    viewport.current?.setReference(placed.geometry, visible)
-    setMesh({ name: meshBase.current.name, triangles: meshBase.current.triangles, longest, size: placed.size, visible })
-  }
-
-  async function importMesh(file) {
-    try {
-      const loaded = await loadMesh(file)
-      meshBase.current?.geometry.dispose()
-      meshBase.current = loaded
-      meshTurn.current = new Matrix4()
-      loaded.geometry.computeBoundingBox()
-      const size = loaded.geometry.boundingBox.getSize(new Vector3())
-      // Keep the file's own size when it is plausible, otherwise start at 100 mm.
-      const longest = Math.max(size.x, size.y, size.z) * loaded.mmPerUnit
-      placeReference(longest >= 1 && longest <= 5000 ? Math.round(longest * 100) / 100 : 100, true)
-      setNotice('Reference mesh loaded: ' + Math.round(loaded.triangles).toLocaleString() + ' triangles.')
-    } catch (failure) {
-      setNotice('Could not import mesh. ' + (failure?.message ?? String(failure)))
-    }
-  }
-
-  function turnMesh(axis) {
-    const rotation = new Matrix4()
-    if (axis === 'x') rotation.makeRotationX(Math.PI / 2)
-    if (axis === 'y') rotation.makeRotationY(Math.PI / 2)
-    if (axis === 'z') rotation.makeRotationZ(Math.PI / 2)
-    meshTurn.current.premultiply(rotation)
-    placeReference(mesh.longest, mesh.visible)
-  }
-
-  function removeMesh() {
-    meshBase.current?.geometry.dispose()
-    meshPlaced.current?.dispose()
-    meshBase.current = meshPlaced.current = null
-    viewport.current?.setReference(null, false)
-    setMesh(null)
-  }
-
-  // Front, right and top silhouettes of the reference mesh become traced views at true scale.
-  async function viewsFromMesh() {
-    try {
-      const shots = await renderSilhouettes(meshPlaced.current)
-      let next = trace
-      for (const [name, { blob, width }] of Object.entries(shots)) {
-        const image = await loadTraceImage(blob, mesh.name + ' ' + name + '.png', { maxSize: meshTraceSize, lossless: true })
-        const id = 'img-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6)
-        traceImages.current[id] = image
-        const view = createView(image, id)
-        next = withView(next, name, () => ({ ...view, scale: { ...view.scale, mode: 'width', width: Math.round(width * 1000) / 1000 } }))
-      }
-      changeTrace({ ...next, view: 'front', shape: { ...next.shape, mode: 'extrude' } }, 'views from mesh')
-      setNotice('Front, right and top views made from the reference mesh.')
-    } catch (failure) {
-      setNotice('Could not make views. ' + (failure?.message ?? String(failure)))
-    }
-  }
-
-  async function importTraceImage(name, file) {
-    try {
-      const image = await loadTraceImage(file)
-      const id = 'img-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6)
-      traceImages.current[id] = image
-      changeTrace({ ...withView(trace, name, () => createView(image, id)), view: name }, 'traced image')
-    } catch (failure) {
-      setNotice('Could not import image. ' + (failure?.message ?? String(failure)))
-    }
-  }
-
-  // Replaces a view with its straightened photo. With the rectangle's real width, the scale is set too.
-  function straightenTraceView(name, image, realWidth) {
-    const id = 'img-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6)
-    traceImages.current[id] = image
-    const view = createView(image, id)
-    const scale = realWidth ? { ...view.scale, mode: 'points', points: [[0, 0], [image.width, 0]], distance: realWidth } : view.scale
-    changeTrace(withView(trace, name, () => ({ ...view, scale })), 'straightened photo')
-  }
-
   async function exportAdapter() {
     setStepExporting(true)
     try {
@@ -441,14 +173,7 @@ export default function App() {
 
   async function applyProject(source) {
     const snapshot = decodeProject(source, { modes: modes.map(({ id }) => id), parts: Object.keys(parts), joints })
-    const loaded = {}
-    if (snapshot.traced) {
-      for (const [id, { name, url }] of Object.entries(snapshot.traced.images)) loaded[id] = await imageFromDataUrl(url, name)
-    }
-    traceImages.current = loaded
-    const nextTrace = snapshot.traced?.trace ?? emptyTrace
-    setTrace(nextTrace)
-    setTraceSpec(traceToSpec(nextTrace).spec ?? null)
+    await traced.restore(snapshot.traced)
     setCadSource(snapshot.cadSource)
     setPlaying(false)
     setWorkspace(snapshot.workspace)
@@ -507,7 +232,7 @@ export default function App() {
         workspace, frame, pose, taught, adapter: adapterCommands.get_body().dimensions, selected, hidden, isolated, expanded,
         grid, wireframe, snap, section, showAxes, explosion,
         service: { joint: serviceJoint, part: servicePart, hidden: serviceHidden, separation },
-        cadSource, trace: serializeTrace(trace, traceImages.current),
+        cadSource, trace: traced.serialize(),
         ...viewport.current.captureScene(),
       })
       if (outcome) setNotice('Project saved.')
@@ -945,14 +670,12 @@ export default function App() {
             </div>}
             {workspace === 'cad' && cadSource === 'adapter' && <CadPanel dimensions={dimensions} onApply={applyDimensions} onExport={exportAdapter}
               building={cadBuilding || !ready} exporting={stepExporting} error={cadError} />}
-            {/* Stays mounted so the imported image and point edits survive switching modes. */}
-            <div hidden={workspace !== 'cad' || cadSource !== 'trace'}>
-              <TracePanel trace={trace} images={traceImages.current} result={traceResult} onChange={changeTrace} onLive={setTrace} onImport={importTraceImage}
-                onStraighten={straightenTraceView} mesh={mesh} onImportMesh={importMesh} onMeshSize={(longest) => placeReference(longest, mesh.visible)} onMeshTurn={turnMesh}
-                onMeshVisible={(visible) => { setMesh({ ...mesh, visible }); viewport.current?.setReference(undefined, visible) }} onMeshRemove={removeMesh} onViewsFromMesh={viewsFromMesh}
-                onBuild={() => setTraceSpec(traceResult.spec)} onExport={exportAdapter} building={cadBuilding || !ready} exporting={stepExporting}
-                error={cadSource === 'trace' ? cadError : ''} upToDate={traceUpToDate && !cadBuilding && !cadError} />
-            </div>
+            {traceOpened && <div hidden={workspace !== 'cad' || cadSource !== 'trace'}>
+              <Suspense fallback={<p className="mode-copy">Loading trace tools…</p>}>
+                <TracePanel {...traced.panelProps} onBuild={traced.build} onExport={exportAdapter} building={cadBuilding || !ready} exporting={stepExporting}
+                  error={cadSource === 'trace' ? cadError : ''} upToDate={traced.traceUpToDate && !cadBuilding && !cadError} />
+              </Suspense>
+            </div>}
             {(workspace === 'teach' || workspace === 'pick') && <ToolFrame values={toolValues} axes={showAxes} setAxes={setShowAxes} pick={workspace === 'pick'} />}
             {workspace === 'teach' && <TeachPanels {...{ pose, setJoint, frame, ready }} keys={taught} onSeek={(at) => { setPlaying(false); seek(at) }} onSave={savePose} onDelete={deletePose} />}
             {workspace === 'pick' && <PickPanel frame={frame} seek={(at) => { setPlaying(false); seek(at) }} />}
