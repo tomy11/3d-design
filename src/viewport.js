@@ -6,6 +6,7 @@ import { hierarchy, joints, keyframes, loadRobot, makeMotionClip } from './robot
 import { driveIndex, makeDrive } from './drive'
 import { loadGripper, makePickCell, pinchOffset } from './pick-cell'
 import { boxObstacle, checkClearance, nodeObstacle } from './clearance'
+import { solvePose } from './ik'
 import modelNotice from '../public/models/ur10e-license.txt?raw'
 import gripperNotice from '../public/models/robotiq-license.txt?raw'
 
@@ -646,6 +647,36 @@ export async function createViewport(element, { onSelect, onSelectDrive, onChang
       collisionFrames = new Set()
       dirty = true
       return standoff * 1000
+    },
+    // Re-solves each keyframe's joints so the gripper's pinch point, now further out by the mounted
+    // part, lands exactly where it did without the part. Returns { keys, largestChange, unreached }.
+    retargetProgram(keys) {
+      const saved = pivots.map((joint) => T.MathUtils.radToDeg(joint.rotation.z))
+      const limits = joints.map(({ limit }) => limit)
+      const flange = (angles) => {
+        robot.setAngles(angles)
+        robot.tool.updateWorldMatrix(true, false)
+        return robot.tool.matrixWorld.clone()
+      }
+      const original = new T.Matrix4().makeTranslation(0, 0, pinchOffset)
+      const extended = new T.Matrix4().makeTranslation(0, 0, pinchOffset + standoff)
+      const solved = new Map()
+      let largestChange = 0
+      let unreached = 0
+      const result = keys.map((key) => {
+        const id = key.angles.join(',')
+        if (!solved.has(id)) {
+          const target = flange(key.angles).multiply(original)
+          // Starting from the taught angles keeps the arm in the same configuration.
+          const answer = solvePose({ pose: (angles) => flange(angles).multiply(extended), start: key.angles, target, limits })
+          solved.set(id, answer)
+          if (!answer.converged) unreached++
+          largestChange = Math.max(largestChange, ...answer.angles.map((value, index) => Math.abs(value - key.angles[index])))
+        }
+        return { ...key, angles: solved.get(id).angles }
+      })
+      robot.setAngles(saved)
+      return { keys: result, largestChange, unreached }
     },
     // Runs a program and reports when the gripper or mounted part enters a tray, the floor or the arm.
     checkClearance(sample, frames) {

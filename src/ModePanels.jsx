@@ -82,9 +82,10 @@ function ClearanceReport({ frame, seek, clearance }) {
   if (clearance.error) return <p className="cad-error" role="alert">Could not check clearance. {clearance.error}</p>
   const { collisions } = clearance
   if (!collisions.length) return <p className="clearance-ok"><CheckCircle2 size={14} /> No collisions with the trays, floor or arm over the whole program.</p>
+  const hint = clearance.height > 0 && !clearance.retargeted ? ' Re-solving the joints for the longer tool may clear them.' : ''
   return (
     <>
-      <p className="clearance-warning"><AlertTriangle size={14} /> {collisions.length} {collisions.length === 1 ? 'collision' : 'collisions'} in the program.</p>
+      <p className="clearance-warning"><AlertTriangle size={14} /> {collisions.length} {collisions.length === 1 ? 'collision' : 'collisions'} in the program.{hint}</p>
       <ul className="phase-list clearance-list">
         {collisions.map((hit) => <li key={hit.what + hit.with + hit.from}>
           <button aria-current={frame >= hit.from && frame <= hit.to ? 'step' : undefined} onClick={() => seek(hit.from)}>
@@ -96,7 +97,7 @@ function ClearanceReport({ frame, seek, clearance }) {
   )
 }
 
-export function PickPanel({ frame, seek, mount, onMount, clearance }) {
+export function PickPanel({ frame, seek, mount, onMount, retarget, onRetarget, clearance }) {
   const active = phases.findLastIndex((phase) => frame >= phase.frame)
   return (
     <section className="panel mode-panel">
@@ -111,7 +112,14 @@ export function PickPanel({ frame, seek, mount, onMount, clearance }) {
           <h4>Tool flange</h4>
           <label className="trace-check"><input type="checkbox" checked={mount} onChange={(event) => onMount(event.target.checked)} /> Mount the CAD part between flange and gripper</label>
           {mount && clearance?.missing && <p className="mode-copy">Build the traced part in CAD mode first.</p>}
-          {mount && clearance?.height > 0 && <p className="mode-copy">The {clearance.part} adds {clearance.height.toFixed(1)} mm, so the gripper and TCP sit that much further out. The taught positions are unchanged.</p>}
+          {mount && clearance?.height > 0 && <>
+            <p className="mode-copy">The {clearance.part} adds {clearance.height.toFixed(1)} mm, so the gripper and TCP sit that much further out.
+              {retarget ? '' : ' The taught joint angles are unchanged.'}</p>
+            <label className="trace-check"><input type="checkbox" checked={retarget} onChange={(event) => onRetarget(event.target.checked)} /> Re-solve joints so the TCP still reaches the taught points</label>
+            {clearance.retargeted && <p className="mode-copy">{clearance.unreached
+              ? clearance.unreached + ' keyframe' + (clearance.unreached === 1 ? ' is' : 's are') + ' out of reach with this part; the closest poses are used.'
+              : 'Every keyframe re-solved. Largest joint change ' + clearance.largestChange.toFixed(1) + '°.'}</p>}
+          </>}
           <ClearanceReport frame={frame} seek={seek} clearance={clearance} />
         </div>
         <p className="mode-copy">Robotiq Hand-E, 50 mm stroke. <a href={gripperSource} target="_blank" rel="noreferrer">Manufacturer CAD source</a></p>
