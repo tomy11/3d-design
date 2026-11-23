@@ -33,6 +33,8 @@ flowchart LR
 3. **CAD Worker** สร้าง Solid และ mesh จากพารามิเตอร์ชุดเดียวกัน Viewport แสดง mesh ส่วน STEP ส่งออกจาก Solid ของ revision ที่ถูกเลือก งานสร้างรูปทรงที่ใช้เวลานานคืน job ID และผูกผลกับ revision ต้นทาง
 4. **MCP บนเดสก์ท็อป** ให้ AI client ที่รองรับ `stdio` เรียกโปรเซส MCP ภายในเครื่อง ตัว bridge ส่งคำสั่งผ่าน IPC ไปยังหน้าต่าง Tauri ที่ผูกกับโปรเจกต์นั้น หากโปรเจกต์เปลี่ยนระหว่างคำนวณ ให้คืนสถานะ conflict พร้อม revision ล่าสุด เว็บใช้ชุดคำสั่งกลางผ่าน UI เช่นกัน การเปิดให้ AI ภายนอกเรียกเว็บเป็นช่วงถัดไปผ่าน endpoint ที่ระบุบัญชีและโปรเจกต์ได้ [MCP SDK](https://ts.sdk.modelcontextprotocol.io/server) · [Tauri IPC](https://v2.tauri.app/concept/inter-process-communication/)
 
+[วิธีเชื่อม Assembly Lab Desktop กับ MCP client](desktop-mcp.md)
+
 ## คำสั่ง MCP รุ่นแรก
 
 | กลุ่ม | คำสั่ง | สัญญาที่ต้องทดสอบ |

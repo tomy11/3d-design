@@ -7,6 +7,9 @@ use tauri::AppHandle;
 use tauri_plugin_dialog::DialogExt;
 use tempfile::NamedTempFile;
 
+#[cfg(unix)]
+mod mcp;
+
 // Projects can embed traced reference images.
 const PROJECT_LIMIT: u64 = 16 * 1024 * 1024;
 const STEP_LIMIT: usize = 20 * 1024 * 1024;
@@ -112,13 +115,50 @@ fn save_with_dialog(
 }
 
 fn main() {
-    tauri::Builder::default()
-        .plugin(tauri_plugin_dialog::init())
+    #[cfg(unix)]
+    {
+        let result = match std::env::args_os()
+            .nth(1)
+            .as_deref()
+            .and_then(std::ffi::OsStr::to_str)
+        {
+            Some("--mcp") => Some(tauri::async_runtime::block_on(mcp::serve_stdio())),
+            Some("--mcp-http") => Some(tauri::async_runtime::block_on(mcp::serve_http())),
+            _ => None,
+        };
+        if let Some(result) = result {
+            if let Err(error) = result {
+                eprintln!("Assembly Lab MCP: {error}");
+                std::process::exit(1);
+            }
+            return;
+        }
+    }
+
+    #[cfg(unix)]
+    let builder = tauri::Builder::default()
+        .manage(mcp::Bridge::default())
+        .setup(|app| {
+            mcp::start_bridge(app);
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             open_project,
             save_project,
-            save_step
-        ])
+            save_step,
+            mcp::mcp_connect,
+            mcp::mcp_reply
+        ]);
+
+    #[cfg(not(unix))]
+    let builder = tauri::Builder::default().invoke_handler(tauri::generate_handler![
+        open_project,
+        save_project,
+        save_step
+    ]);
+
+    builder
+        .plugin(tauri_plugin_dialog::init())
         .run(tauri::generate_context!())
         .expect("could not launch Assembly Lab");
 }

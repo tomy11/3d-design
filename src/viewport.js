@@ -2,8 +2,8 @@ import * as T from 'three'
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
 import { TransformControls } from 'three/addons/controls/TransformControls.js'
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js'
-import { keyframes, loadRobot, makeMotionClip } from './robot'
-import { makeDrive } from './drive'
+import { hierarchy, joints, keyframes, loadRobot, makeMotionClip } from './robot'
+import { driveIndex, makeDrive } from './drive'
 import { loadGripper, makePickCell, pinchOffset } from './pick-cell'
 import modelNotice from '../public/models/ur10e-license.txt?raw'
 import gripperNotice from '../public/models/robotiq-license.txt?raw'
@@ -20,6 +20,7 @@ export async function createViewport(element, { onSelect, onSelectDrive, onChang
   let workspace = 'inspect'
   let servicePart = null
   let lastServiceJoint = -1
+  let robotFrame = 0
   let showToolAxes = true
   robot.setAngles(keyframes[0].angles)
   const drive = makeDrive()
@@ -112,6 +113,7 @@ export async function createViewport(element, { onSelect, onSelectDrive, onChang
   )
   adapter.name = 'Parametric flange adapter'
   adapter.visible = false
+  let displayedCadSource
   scene.add(adapter)
   // An imported mesh shown see-through over the traced solid, for comparison.
   const reference = new T.Mesh(
@@ -342,6 +344,68 @@ export async function createViewport(element, { onSelect, onSelectDrive, onChang
     }
   }
 
+  function robotPoseReadout() {
+    const { position, rotation } = toolReadout()
+    return {
+      robot_id: 'robot',
+      workspace,
+      frame: robotFrame,
+      joints: joints.map(({ id, joint, limit }, index) => ({
+        id: joint, link_id: id, angle_deg: T.MathUtils.radToDeg(pivots[index].rotation.z), limits_deg: [-limit, limit],
+      })),
+      tcp: {
+        frame: workspace === 'pick' ? 'gripper_tcp' : 'tool0',
+        reference_frame: 'robot_base',
+        position_mm: position,
+        rotation_deg: rotation,
+        euler_order: readEuler.order,
+      },
+    }
+  }
+
+  function sceneReadout(cadSource) {
+    function robotParts(nodes, parentId = null) {
+      return nodes.flatMap(({ id, name, joint, children }) => [{
+        id, name, parent_id: parentId,
+        kind: id === 'robot' ? 'robot' : children ? 'link' : 'cad_component',
+        ...(joint && { joint_id: joint }),
+        visible: effectivelyVisible(linkVisuals[id] ?? objects[id]),
+      }, ...robotParts(children ?? [], id)])
+    }
+
+    const nodes = robotParts(hierarchy)
+    const hasSolid = adapter.visible && Boolean(adapter.geometry.attributes.position?.count)
+    nodes.push({ id: 'flange-adapter', name: 'Flange adapter', parent_id: null, kind: 'parametric_body', visible: hasSolid && displayedCadSource === 'adapter' })
+    if (cadSource === 'trace' || displayedCadSource === 'trace' || reference.geometry.attributes.position?.count) {
+      nodes.push({
+        id: 'traced-part', name: 'Traced part', parent_id: null, kind: 'traced_body', visible: hasSolid && displayedCadSource === 'trace',
+      })
+    }
+    if (reference.geometry.attributes.position?.count) {
+      nodes.push({
+        id: 'reference-mesh', name: 'Reference mesh', parent_id: null, kind: 'reference_mesh', visible: reference.visible,
+      })
+    }
+    if (workspace === 'pick') {
+      nodes.push(
+        { id: 'gripper', name: 'Robotiq Hand-E', parent_id: 'wrist3', kind: 'gripper', visible: effectivelyVisible(pickCell.gripper) },
+        { id: 'pick-station', name: 'Pick & Place station', parent_id: 'robot', kind: 'station', visible: effectivelyVisible(pickCell.stations) },
+      )
+    }
+    if (workspace === 'service') {
+      nodes.push({ id: 'concept-drive', name: 'Concept joint drive', parent_id: joints[lastServiceJoint]?.id ?? 'robot', kind: 'concept_assembly', visible: effectivelyVisible(drive.root) })
+      for (const { id, name, parents, children } of Object.values(driveIndex)) {
+        nodes.push({
+          id, name, parent_id: parents.at(-1) ?? 'concept-drive',
+          kind: children ? 'concept_group' : 'concept_component',
+          visible: effectivelyVisible(drive.nodes[id]),
+        })
+      }
+    }
+    const selectedId = workspace === 'service' ? servicePart : workspace === 'cad' ? null : selected
+    return { workspace, selected_id: selectedId, cad_source: workspace === 'cad' ? cadSource : null, objects: nodes }
+  }
+
   function resize() {
     const { clientWidth, clientHeight } = element
     if (!clientWidth || !clientHeight) return
@@ -424,6 +488,8 @@ export async function createViewport(element, { onSelect, onSelectDrive, onChang
     view,
     focus,
     toolReadout,
+    robotPoseReadout,
+    sceneReadout,
     clearMeasurement,
     // geometry is in millimetres, or null to remove the reference mesh.
     setReference(geometry, visible) {
@@ -445,7 +511,7 @@ export async function createViewport(element, { onSelect, onSelectDrive, onChang
     refitAdapter() {
       fittingAdapter = true
     },
-    setAdapter({ positions, normals, indices }) {
+    setAdapter({ positions, normals, indices }, source) {
       const geometry = new T.BufferGeometry()
       geometry.setAttribute('position', new T.BufferAttribute(positions, 3))
       geometry.setAttribute('normal', new T.BufferAttribute(normals, 3))
@@ -454,6 +520,7 @@ export async function createViewport(element, { onSelect, onSelectDrive, onChang
       geometry.computeBoundingSphere()
       adapter.geometry.dispose()
       adapter.geometry = geometry
+      displayedCadSource = positions.length ? source : undefined
       referenceLook()
       if (workspace === 'cad' && fittingAdapter) view('perspective')
       fittingAdapter = false
@@ -534,6 +601,7 @@ export async function createViewport(element, { onSelect, onSelectDrive, onChang
     setPose(angles, frame) {
       dirty = true
       robot.setAngles(angles)
+      robotFrame = frame
       if (workspace === 'pick') pickCell.update(frame)
       if (explosion) robot.separate(explosion)
     },

@@ -16,6 +16,7 @@ import { createView, emptyTrace, serializeTrace, withView } from './trace-state'
 import { loadMesh, placeMesh, renderSilhouettes } from './mesh-reference'
 import { Matrix4, Vector3 } from 'three'
 import { createAdapterCommands } from './adapter-commands'
+import { useDesktopMcp } from './desktop-mcp'
 import { runCad } from './adapter-client'
 import { decodeProject, desktop, openNativeProject, readBrowserProject, saveProject, saveStep } from './project-file'
 import { createViewport } from './viewport'
@@ -226,6 +227,7 @@ export default function App() {
   const dialog = useRef(null)
   const fileInput = useRef(null)
   const history = useRef({ undo: [], redo: [] })
+  const editRevision = useRef(0)
   const [, setHistoryVersion] = useState(0)
   const [projectBusy, setProjectBusy] = useState(false)
   const [sceneRestore, setSceneRestore] = useState(null)
@@ -280,6 +282,10 @@ export default function App() {
   const [playing, setPlaying] = useState(false)
   const [exporting, setExporting] = useState(false)
   const [notice, setNotice] = useState('')
+  const rotateMcpProjectId = useDesktopMcp(ready, adapterCommands, setNotice, {
+    get_scene: () => ({ revision: editRevision.current, ...viewport.current.sceneReadout(cadSource) }),
+    get_robot_pose: () => ({ revision: editRevision.current, ...viewport.current.robotPoseReadout() }),
+  })
   const [error, setError] = useState(false)
   const frameRef = useRef(0)
   const cameraMoved = useRef(false)
@@ -297,6 +303,7 @@ export default function App() {
     stack.push(change)
     if (stack.length > 100) stack.shift()
     history.current.redo.length = 0
+    editRevision.current += 1
     setHistoryVersion((version) => version + 1)
   }
 
@@ -317,6 +324,7 @@ export default function App() {
       persistTaughtProgram(value)
     }
     history.current[undo ? 'redo' : 'undo'].push(change)
+    editRevision.current += 1
     setHistoryVersion((version) => version + 1)
     setNotice((undo ? 'Undid ' : 'Redid ') + change.label + '.')
   }
@@ -452,6 +460,7 @@ export default function App() {
     setOverrides(Object.fromEntries(snapshot.pose.map((angle, index) => [index, angle])))
     setServicePose(snapshot.pose)
     adapterCommands.restore(snapshot.adapter)
+    rotateMcpProjectId()
     setExpanded(snapshot.expanded)
     setSelected(snapshot.selected)
     setHidden(snapshot.hidden)
@@ -468,6 +477,7 @@ export default function App() {
     setSeparation(snapshot.service.separation)
     cameraMoved.current = true
     history.current = { undo: [], redo: [] }
+    editRevision.current = 0
     setSceneRestore({ transforms: snapshot.transforms, camera: snapshot.camera })
     setNotice('Project opened.')
   }
@@ -601,6 +611,7 @@ export default function App() {
 
   function setJoint(index, angle) {
     setPlaying(false)
+    if (pose[index] !== angle) editRevision.current += 1
     setOverrides((previous) => ({ ...previous, [index]: angle }))
   }
 
@@ -692,20 +703,20 @@ export default function App() {
     setCadError('')
     const tracing = cadSource === 'trace'
     if (tracing && !traceSpec) {
-      viewport.current?.setAdapter({ positions: new Float32Array(), normals: new Float32Array(), indices: new Uint32Array() })
+      viewport.current?.setAdapter({ positions: new Float32Array(), normals: new Float32Array(), indices: new Uint32Array() }, cadSource)
       setCadMeshBuilding(false)
       return
     }
     viewport.current?.refitAdapter()
     if (!tracing && adapterMesh) {
-      viewport.current?.setAdapter(adapterMesh)
+      viewport.current?.setAdapter(adapterMesh, cadSource)
       setCadMeshBuilding(false)
       return
     }
     setCadMeshBuilding(true)
     const build = tracing ? runCad('mesh', traceSpec, 'trace') : runCad('mesh', dimensions)
     build.then((mesh) => {
-      if (current) viewport.current?.setAdapter(mesh)
+      if (current) viewport.current?.setAdapter(mesh, cadSource)
     }).catch((failure) => {
       if (current) setCadError('Open CASCADE could not rebuild the solid. ' + (failure?.message ?? String(failure)))
     }).finally(() => {
