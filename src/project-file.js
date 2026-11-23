@@ -1,4 +1,5 @@
 import { validateAdapter, adapterFields } from './adapter-spec'
+import { driveIds } from './drive'
 
 export const PROJECT_EXTENSION = 'assemblylab'
 export const desktop = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
@@ -65,8 +66,7 @@ export function decodeProject(source, { modes, parts, joints }) {
     Math.hypot(...camera.position.map((value, index) => value - camera.target[index])) >= 0.01, 'Invalid camera state.')
   clause([grid, wireframe, snap, section?.enabled, showAxes].every((value) => typeof value === 'boolean') &&
     ['x', 'y', 'z'].includes(section.axis) && between(section.offset, -1500, 1500) && between(explosion, 0, 1), 'Invalid viewport settings.')
-  const drive = ['motor', 'gearbox', 'wiring']
   clause(integer(service?.joint, 0, 5) && between(service.separation, 0, 1) &&
-    id(service.part, drive) && ids(service.hidden, drive), 'Invalid service settings.')
+    id(service.part, driveIds) && ids(service.hidden, driveIds), 'Invalid service settings.')
   return { ...document, adapter: Object.fromEntries(adapterFields.map(({ id: key }) => [key, adapter[key]])) }
 }

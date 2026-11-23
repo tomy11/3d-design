@@ -222,15 +222,23 @@ export async function createViewport(element, { onSelect, onSelectDrive, onChang
     gizmo.detach()
     outline.clear()
     outlinedMeshes = []
-    if (measuring || workspace === 'service' || workspace === 'pick' || workspace === 'cad') return
+    if (workspace === 'service' && !measuring) {
+      const piece = drive.nodes[servicePart]
+      if (piece && effectivelyVisible(piece)) outlineMeshes(piece)
+      return
+    }
+    if (measuring || workspace === 'pick' || workspace === 'cad') return
     const object = objects[id]
     if (!object || !effectivelyVisible(linkVisuals[id] ?? object)) return
     if (tool !== 'select' && workspace === 'inspect') {
       gizmo.setMode(tool)
       gizmo.attach(object)
     }
-    const visual = linkVisuals[id] ?? object
     if (id === 'robot') return
+    outlineMeshes(linkVisuals[id] ?? object)
+  }
+
+  function outlineMeshes(visual) {
     visual.traverse((node) => {
       if (!node.isMesh) return
       if (!edges.has(node.geometry)) edges.set(node.geometry, new T.EdgesGeometry(node.geometry, 55))
@@ -282,7 +290,7 @@ export async function createViewport(element, { onSelect, onSelectDrive, onChang
 
   function focus() {
     const target = workspace === 'cad' ? adapter : workspace === 'service'
-      ? (drive.groups[servicePart] ?? drive.root)
+      ? (drive.nodes[servicePart] ?? drive.root)
       : (linkVisuals[selected] ?? objects[selected])
     const direction = camera.position.clone().sub(orbit.target).normalize()
     frameObject(target, direction)
@@ -464,7 +472,8 @@ export async function createViewport(element, { onSelect, onSelectDrive, onChang
       dirty = true
       servicePart = active
       drive.attach(pivots[joint], joint, separation)
-      for (const [id, group] of Object.entries(drive.groups)) group.visible = !hidden.includes(id)
+      for (const [id, node] of Object.entries(drive.nodes)) node.visible = !hidden.includes(id)
+      updateSelection(selected)
       if (joint !== lastServiceJoint) {
         view('perspective')
         lastServiceJoint = joint
@@ -523,11 +532,10 @@ export async function createViewport(element, { onSelect, onSelectDrive, onChang
     },
     async export({ service, pick, clipName, duration, sample }) {
       const { GLTFExporter } = await import('three/addons/exporters/GLTFExporter.js')
-      const snapshot = service ? drive.root.clone() : plant.clone()
+      const snapshot = service ? drive.assembledClone() : plant.clone()
       const exporter = new GLTFExporter()
       if (service) {
         snapshot.scale.setScalar(1)
-        for (const group of snapshot.children) group.position.set(0, 0, 0)
         const file = await exporter.parseAsync(snapshot, { binary: true, onlyVisible: false })
         download(file, 'concept-joint-drive.glb')
         return

@@ -1,7 +1,8 @@
-import { Axis3D, Box, Download, Eye, EyeOff, Layers3, Plus, ScanLine, SlidersHorizontal, Trash2, Wrench } from 'lucide-react'
+import { useEffect, useRef, useState } from 'react'
+import { Axis3D, Box, ChevronDown, ChevronRight, Download, Eye, EyeOff, Layers3, Plus, ScanLine, SlidersHorizontal, Trash2, Wrench } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { joints } from './robot'
-import { driveLayers } from './drive'
+import { driveIndex, drivePieceCount, driveTree } from './drive'
 import { gripperSource } from './pick-cell'
 
 
@@ -91,6 +92,49 @@ export function PickPanel({ frame, seek }) {
   )
 }
 
+const leafCount = (node) => node.children ? node.children.reduce((sum, child) => sum + leafCount(child), 0) : 1
+
+function DriveTree({ selected, changeSelected, hidden, toggleHidden }) {
+  const [expanded, setExpanded] = useState([])
+  useEffect(() => {
+    if (selected) setExpanded((open) => [...new Set([...open, ...driveIndex[selected].parents])])
+  }, [selected])
+  const scroller = useRef(null)
+  useEffect(() => {
+    scroller.current?.querySelector('.tree-row.selected')?.scrollIntoView({ block: 'nearest' })
+  }, [selected, expanded])
+  function rows(nodes, level) {
+    return (
+      <ul className="scene-list">
+        {nodes.map((node) => {
+          const open = expanded.includes(node.id)
+          const concealed = hidden.includes(node.id)
+          const shown = !concealed && driveIndex[node.id].parents.every((parent) => !hidden.includes(parent))
+          return (
+            <li key={node.id}>
+              <div className={`tree-row ${selected === node.id ? 'selected' : ''} ${shown ? '' : 'concealed'}`} style={{ '--depth': level }}>
+                {node.children
+                  ? <Button size="icon" variant="ghost" className="tree-toggle" aria-label={(open ? 'Collapse ' : 'Expand ') + node.name} aria-expanded={open}
+                    onClick={() => setExpanded((list) => open ? list.filter((id) => id !== node.id) : [...list, node.id])}>{open ? <ChevronDown /> : <ChevronRight />}</Button>
+                  : <span className="tree-spacer" />}
+                <button className="tree-label" aria-pressed={selected === node.id} onClick={() => changeSelected(selected === node.id ? null : node.id)}>
+                  {node.color ? <i className="drive-swatch" style={{ background: node.color }} /> : node.children ? <Layers3 size={14} /> : <Box size={14} />}
+                  <span>{node.name}</span>{node.children && <span className="joint-tag">{leafCount(node)}</span>}
+                </button>
+                <Button size="icon" variant="ghost" className="tree-eye" aria-label={(concealed ? 'Show ' : 'Hide ') + node.name} onClick={() => toggleHidden(node.id)}>
+                  {concealed ? <EyeOff /> : <Eye />}
+                </Button>
+              </div>
+              {node.children && open && rows(node.children, level + 1)}
+            </li>
+          )
+        })}
+      </ul>
+    )
+  }
+  return <div className="tree-scroll drive-tree" ref={scroller}>{rows(driveTree, 0)}</div>
+}
+
 export function ServicePanels({ joint, setJoint, separation, setSeparation, selected, changeSelected, hidden, toggleHidden }) {
   return (
     <>
@@ -109,20 +153,10 @@ export function ServicePanels({ joint, setJoint, separation, setSeparation, sele
         </div>
       </section>
       <section className="panel mode-panel">
-        <PanelTitle icon={Layers3}>Internal components</PanelTitle>
+        <PanelTitle icon={Layers3} aside={drivePieceCount + ' parts'}>Internal components</PanelTitle>
         <div className="mode-panel-body">
-          <ul className="drive-list">
-            {driveLayers.map(({ id, name, color, detail }) => (
-              <li key={id} className={selected === id ? 'active' : ''}>
-                <button className="drive-select" aria-pressed={selected === id} onClick={() => changeSelected(selected === id ? null : id)}>
-                  <span style={{ background: color }} /><span><strong>{name}</strong><small>{detail}</small></span>
-                </button>
-                <Button size="icon" variant="ghost" aria-label={(hidden.includes(id) ? 'Show ' : 'Hide ') + name} onClick={() => toggleHidden(id)}>
-                  {hidden.includes(id) ? <EyeOff size={15} /> : <Eye size={15} />}
-                </Button>
-              </li>
-            ))}
-          </ul>
+          <DriveTree selected={selected} changeSelected={changeSelected} hidden={hidden} toggleHidden={toggleHidden} />
+          {selected && <p className="drive-path">{[...driveIndex[selected].parents, selected].map((id) => driveIndex[id].name).join(' › ')}</p>}
           <Button asChild className="w-full scad-download" variant="outline"><a href={import.meta.env.BASE_URL + 'models/concept-joint-drive.scad'} download><Download size={15} /> Download OpenSCAD</a></Button>
         </div>
       </section>
@@ -134,7 +168,7 @@ export function ServiceFooter({ joint }) {
   return (
     <section className="panel service-footer">
       <PanelTitle icon={Wrench}>Joint {joints[joint].joint} / {joints[joint].name}</PanelTitle>
-      <p>Use the parts list to show or hide each subassembly. Press <kbd>F</kbd> to frame the selected component.</p>
+      <p>Drag <b>Parts separation</b> past halfway to spread every piece. Click a piece or pick it in the parts list, then press <kbd>F</kbd> to frame it.</p>
     </section>
   )
 }
