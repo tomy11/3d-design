@@ -1,5 +1,5 @@
-import { defaultTraceSettings, traceImage, viewNames } from './trace'
-import { validRegions } from './trace-spec'
+import { defaultTraceSettings, traceImage, viewNames } from './trace.js'
+import { validEdge, validRegions } from './trace-spec.js'
 
 // Trace state is plain JSON so it can be undone and saved. Images live apart, keyed by id,
 // because their pixel arrays are large: a view only names its imageId.
@@ -46,7 +46,7 @@ export function decodeTrace(value) {
       typeof image.url === 'string' && image.url.length <= maxImageUrl && /^data:image\/(png|jpeg);base64,/.test(image.url)) &&
     viewNames.includes(value.view) && value.views && viewNames.every((name) => validView(value.views[name], images)) &&
     ['extrude', 'revolve'].includes(value.shape?.mode) && finite(value.shape.thickness) &&
-    finite(value.shape.axis) && value.shape.axis >= 0 && value.shape.axis <= 100
+    finite(value.shape.axis) && value.shape.axis >= 0 && value.shape.axis <= 100 && validEdge(value.shape.edge)
   if (!valid) throw new Error('Invalid traced part.')
   const { images: _images, ...trace } = value
   return { trace: { ...trace, views: Object.fromEntries(viewNames.map((name) => [name, value.views[name]])) }, images }

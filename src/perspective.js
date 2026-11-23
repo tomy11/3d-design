@@ -1,4 +1,4 @@
-import { imageFromCanvas, maxTraceSize } from './trace'
+import { imageFromCanvas, maxTraceSize } from './trace.js'
 
 // Straightens a photo taken at an angle: four picked corners of a real rectangle (a sheet of
 // paper, a drawing border, the part's own square face) are mapped back to a true rectangle.

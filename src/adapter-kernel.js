@@ -79,14 +79,37 @@ function combine(solid, tool, op) {
 }
 
 // Each region is extruded from z0 for depth, with its holes cut clean through.
-function extrudeRegions(regions, z0, depth) {
+// With blind set (single-view extrude), a region may have its own height and a hole its own
+// depth, both measured from the front face, which faces the viewer at the top of the region.
+function extrudeRegions(regions, z0, depth, blind = false) {
   let solid = null
   for (const region of regions) {
-    let part = drawLoop(region.outer).sketchOnPlane('XY', z0).extrude(depth)
-    for (const hole of region.holes) part = combine(part, drawLoop(hole).sketchOnPlane('XY', z0 - 1).extrude(depth + 2), 'cut')
+    const height = blind && region.height ? region.height : depth
+    let part = drawLoop(region.outer).sketchOnPlane('XY', z0).extrude(height)
+    for (const hole of region.holes) {
+      // A blind cut starts its depth below the front face; a through cut overshoots both faces by 1 mm.
+      const tool = blind && hole.depth && hole.depth < height
+        ? drawLoop(hole).sketchOnPlane('XY', z0 + height - hole.depth).extrude(hole.depth + 1)
+        : drawLoop(hole).sketchOnPlane('XY', z0 - 1).extrude(height + 2)
+      part = combine(part, tool, 'cut')
+    }
     solid = combine(solid, part, 'fuse')
   }
   return solid
+}
+
+// Rounds or bevels every edge lying on a front face.
+function finishEdges(solid, regions, thickness, edge) {
+  if (!edge || edge.kind === 'none') return solid
+  const fronts = [...new Set(regions.map((region) => region.height || thickness))]
+  const filter = (finder) => finder.either(fronts.map((z) => (f) => f.inPlane('XY', z)))
+  try {
+    const next = edge.kind === 'fillet' ? solid.fillet(edge.size, filter) : solid.chamfer(edge.size, filter)
+    solid.delete()
+    return next
+  } catch {
+    throw new Error('The ' + (edge.kind === 'fillet' ? 'rounding' : 'chamfer') + ' of ' + edge.size + ' mm does not fit this outline. Try a smaller size.')
+  }
 }
 
 // Image axes of each view: front looks along -Z, right along -X, top along -Y.
@@ -124,7 +147,10 @@ export async function runTrace(action, spec) {
   let solid = null
   try {
     if (spec.mode === 'revolve') solid = revolveRegions(spec.views.front, spec.axis)
-    else if (spec.mode === 'extrude') solid = extrudeRegions(spec.views.front, 0, spec.thickness)
+    else if (spec.mode === 'extrude') {
+      solid = extrudeRegions(spec.views.front, 0, spec.thickness, true)
+      solid = finishEdges(solid, spec.views.front, spec.thickness, spec.edge)
+    }
     else {
       // Every view is extruded through the whole part, and the solid is what all of them share.
       const reach = Math.max(...Object.values(spec.views).map(extent)) + 5

@@ -43,7 +43,9 @@ export function imageFromCanvas(canvas, name) {
 // Reopens an image saved in a project at its saved size, so traced pixel positions still match.
 export async function imageFromDataUrl(url, name) {
   const bitmap = await createImageBitmap(await (await fetch(url)).blob())
-  return imageFromSource(bitmap, bitmap.width, bitmap.height, name, { maxSize: Math.max(bitmap.width, bitmap.height), url })
+  // The app never saves images larger than meshTraceSize; anything bigger is reduced and re-encoded.
+  const size = Math.max(bitmap.width, bitmap.height)
+  return imageFromSource(bitmap, bitmap.width, bitmap.height, name, { maxSize: meshTraceSize, url: size <= meshTraceSize ? url : undefined, lossless: url.startsWith('data:image/png') })
 }
 
 // Lightly blurred brightness and alpha, plus an automatic threshold.
@@ -353,11 +355,15 @@ export function viewToMillimetres(view) {
   const cx = (bounds.minX + bounds.maxX) / 2
   const cy = (bounds.minY + bounds.maxY) / 2
   const point = ([x, y]) => [round((x - cx) * scale), round((cy - y) * scale)]
-  const convert = (loop) => loop.circle
-    ? { circle: [...point(loop.circle), round(loop.diameter ? loop.diameter / 2 : loop.circle[2] * scale)] }
-    : { points: loop.points.map(point) }
+  // Depths and heights are already in mm.
+  const convert = (loop) => ({
+    ...(loop.circle
+      ? { circle: [...point(loop.circle), round(loop.diameter ? loop.diameter / 2 : loop.circle[2] * scale)] }
+      : { points: loop.points.map(point) }),
+    ...(loop.depth ? { depth: loop.depth } : {}),
+  })
   return {
-    regions: view.regions.map(({ outer, holes }) => ({ outer: convert(outer), holes: holes.map(convert) })),
+    regions: view.regions.map(({ outer, holes, height }) => ({ outer: convert(outer), holes: holes.map(convert), ...(height ? { height } : {}) })),
     width: round((bounds.maxX - bounds.minX) * scale),
     height: round((bounds.maxY - bounds.minY) * scale),
   }
@@ -391,7 +397,7 @@ export function traceToSpec(trace) {
     ? { mode: 'revolve', axis: round(-sizes.front.width / 2 + sizes.front.width * shape.axis / 100), views: { front: converted.front.regions } }
     : multi
       ? { mode: 'views', views: Object.fromEntries(Object.entries(converted).map(([name, value]) => [name, value.regions])) }
-      : { mode: 'extrude', thickness: shape.thickness, views: { front: converted.front.regions } }
+      : { mode: 'extrude', thickness: shape.thickness, views: { front: converted.front.regions }, ...(shape.edge?.kind && shape.edge.kind !== 'none' ? { edge: shape.edge } : {}) }
   return { spec, sizes, warnings }
 }
 

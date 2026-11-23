@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
-import { Box, CircleDot, Crop, Download, Eye, EyeOff, ImagePlus, MousePointer2, Ruler, RotateCcw, RotateCw, ScanLine, Trash2 } from 'lucide-react'
+import { Box, CircleDot, Crop, SquareDashed, Download, Eye, EyeOff, ImagePlus, MousePointer2, Ruler, RotateCcw, RotateCw, ScanLine, Trash2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { circleRadius, isRoundView, loopContains, regionBounds, traceImage, viewLabels, viewNames, viewScale } from './trace'
-import { traceLimits } from './trace-spec'
+import { edgeKinds, traceLimits } from './trace-spec'
 import { withView } from './trace-state'
 import { meshAccept } from './mesh-reference'
 import { orderCorners, straightenImage } from './perspective'
@@ -53,17 +53,19 @@ function editLoop(regions, { regionIndex, loopIndex }, change) {
 }
 
 // A millimetre input that commits on Enter or blur, so typing makes one undo step.
-function MmField({ label, value, min, max, onCommit, compact = false }) {
+// With allowEmpty, clearing the field commits null (for example a hole depth back to through).
+function MmField({ label, value, min, max, onCommit, compact = false, allowEmpty = false, placeholder }) {
   const [draft, setDraft] = useState(null)
   const shown = draft ?? (Number.isFinite(value) ? String(Math.round(value * 100) / 100) : '')
   function commit() {
     const number = Number(draft)
-    if (draft !== null && draft.trim() && Number.isFinite(number) && number >= min && number <= max) onCommit(number)
+    if (draft !== null && !draft.trim() && allowEmpty && Number.isFinite(value)) onCommit(null)
+    else if (draft !== null && draft.trim() && Number.isFinite(number) && number >= min && number <= max) onCommit(number)
     setDraft(null)
   }
   return (
     <label className={compact ? 'mm-field compact' : 'mm-field'}><span>{label}</span>
-      <input type="number" inputMode="decimal" min={min} max={max} step="any" value={shown}
+      <input type="number" inputMode="decimal" min={min} max={max} step="any" value={shown} placeholder={placeholder}
         onChange={(event) => setDraft(event.target.value)} onBlur={commit}
         onKeyDown={(event) => { if (event.key === 'Enter') event.target.blur(); if (event.key === 'Escape') { setDraft(null); event.target.blur() } }} />
     </label>
@@ -111,6 +113,7 @@ export function TracePanel({ trace, images, result, onChange, onLive, onImport, 
   const scale = view ? viewScale(view) : null
   const [tool, setTool] = useState('edit')
   const [holeDiameter, setHoleDiameter] = useState(10)
+  const [pocket, setPocket] = useState(null)
   const [corners, setCorners] = useState([])
   const [rectangle, setRectangle] = useState({ width: NaN, height: NaN })
   const [straightening, setStraightening] = useState(false)
@@ -224,7 +227,7 @@ export function TracePanel({ trace, images, result, onChange, onLive, onImport, 
       context.fillStyle = 'rgba(77, 124, 255, 0.22)'
       context.fill('evenodd')
       ;[region.outer, ...region.holes].forEach((loop, index) => {
-        const color = loop.circle ? '#13a37a' : index ? '#ef8a3c' : '#2f6bff'
+        const color = index && loop.depth ? '#8a63d2' : loop.circle ? '#13a37a' : index ? '#ef8a3c' : '#2f6bff'
         context.beginPath()
         path(loop)
         context.strokeStyle = color
@@ -257,6 +260,14 @@ export function TracePanel({ trace, images, result, onChange, onLive, onImport, 
         context.lineTo(x, y + 6 * px)
         context.stroke()
       }
+    }
+    if (pocket) {
+      context.save()
+      context.setLineDash([5 * px, 3 * px])
+      context.strokeStyle = '#8a63d2'
+      context.lineWidth = 1.6 * px
+      context.strokeRect(pocket[0][0], pocket[0][1], pocket[1][0] - pocket[0][0], pocket[1][1] - pocket[0][1])
+      context.restore()
     }
     if (tool === 'corners' && corners.length) {
       const shown = corners.length === 4 ? orderCorners(corners) : corners
@@ -294,6 +305,12 @@ export function TracePanel({ trace, images, result, onChange, onLive, onImport, 
       setCorners((list) => list.length >= 4 ? [at] : [...list, at])
       return
     }
+    if (tool === 'pocket') {
+      event.currentTarget.setPointerCapture(event.pointerId)
+      drag.current = { pocket: true }
+      setPocket([point, point])
+      return
+    }
     if (tool === 'scale') {
       const points = view.scale.points.length === 1 ? [view.scale.points[0], point] : [point]
       setViewState((current) => ({ ...current, scale: { ...current.scale, mode: 'points', points } }), 'scale points')
@@ -320,6 +337,10 @@ export function TracePanel({ trace, images, result, onChange, onLive, onImport, 
 
   function pointerMove(event) {
     const { point, ratio } = toImage(event)
+    if (drag.current?.pocket) {
+      setPocket((rect) => rect && [rect[0], [Math.max(0, Math.min(image.width, point[0])), Math.max(0, Math.min(image.height, point[1]))]])
+      return
+    }
     if (!drag.current) {
       event.currentTarget.style.cursor = tool !== 'edit' ? 'crosshair'
         : nearestHandle(view.regions, point, grab * ratio) ? 'grab' : nearestSegment(view.regions, point, grab * ratio) ? 'copy' : 'default'
@@ -338,6 +359,25 @@ export function TracePanel({ trace, images, result, onChange, onLive, onImport, 
   }
 
   function pointerUp() {
+    if (drag.current?.pocket) {
+      drag.current = null
+      const rect = pocket
+      setPocket(null)
+      if (!rect || Math.abs(rect[1][0] - rect[0][0]) < 3 || Math.abs(rect[1][1] - rect[0][1]) < 3) return
+      const [[x1, y1], [x2, y2]] = rect
+      const middle = [(x1 + x2) / 2, (y1 + y2) / 2]
+      const region = view.regions.findIndex((item) => loopContains(item.outer, rect[0], scale) || loopContains(item.outer, middle, scale))
+      if (region < 0) return
+      const depth = Math.round(((view.regions[region].height ?? trace.shape.thickness) / 2) * 100) / 100
+      const points = [[x1, y1], [x2, y1], [x2, y2], [x1, y2]]
+      setViewState((current) => ({
+        ...current,
+        edited: true,
+        regions: current.regions.map((item, index) => index === region ? { ...item, holes: [...item.holes, { points, depth }] } : item),
+      }), 'added pocket')
+      setTool('edit')
+      return
+    }
     if (drag.current?.moved) onChange(trace, 'moved point', drag.current.before)
     drag.current = null
   }
@@ -370,14 +410,19 @@ export function TracePanel({ trace, images, result, onChange, onLive, onImport, 
     }), 'removed point')
   }
 
-  const circleHoles = view ? view.regions.flatMap((region, regionIndex) => region.holes
-    .map((hole, holeIndex) => ({ hole, regionIndex, loopIndex: holeIndex + 1 })).filter(({ hole }) => hole.circle)) : []
+  const allHoles = view ? view.regions.flatMap((region, regionIndex) => region.holes
+    .map((hole, holeIndex) => ({ hole, regionIndex, loopIndex: holeIndex + 1 }))) : []
+  const single = trace.shape.mode === 'extrude' && !(trace.views.right?.regions.length || trace.views.top?.regions.length)
+  const depthOf = (regionIndex) => view.regions[regionIndex].height ?? trace.shape.thickness
+  const setHole = (regionIndex, loopIndex, change, label) => setViewState((current) => ({ ...current, edited: true,
+    regions: editLoop(current.regions, { regionIndex, loopIndex }, change) }), label)
   const pointCount = view ? handles(view.regions).length : 0
   const size = result.sizes?.[name]
   const multi = trace.shape.mode === 'extrude' && (trace.views.right?.regions.length || trace.views.top?.regions.length)
   const hints = {
     edit: 'Drag a point or circle centre · double-click a line to add a point · right-click to remove.',
     hole: 'Click inside the part to place a ' + holeDiameter + ' mm hole.',
+    pocket: 'Drag a rectangle over the part for a pocket or step. Set its depth below; a pocket over an edge makes a step.',
     corners: corners.length < 4
       ? 'Click corner ' + (corners.length + 1) + ' of 4 of something truly rectangular: the paper, a drawing border or a square face.'
       : 'Enter the rectangle\'s real size if you know it, then straighten.',
@@ -405,7 +450,7 @@ export function TracePanel({ trace, images, result, onChange, onLive, onImport, 
 
         {view && <>
           <div className="trace-tools" aria-label="Preview tool">
-            {[['edit', MousePointer2, 'Edit'], ['hole', CircleDot, 'Add hole'], ['scale', Ruler, 'Scale points'], ['corners', Crop, 'Straighten']].map(([id, Icon, label]) =>
+            {[['edit', MousePointer2, 'Edit'], ['hole', CircleDot, 'Add hole'], ['pocket', SquareDashed, 'Add pocket'], ['scale', Ruler, 'Scale points'], ['corners', Crop, 'Straighten']].map(([id, Icon, label]) =>
               <Button key={id} type="button" size="sm" variant="ghost" aria-pressed={tool === id} onClick={() => setTool(tool === id ? 'edit' : id)}><Icon size={14} /> {label}</Button>)}
           </div>
           <div className="trace-preview">
@@ -471,22 +516,43 @@ export function TracePanel({ trace, images, result, onChange, onLive, onImport, 
           </div>
 
           <div className="trace-group">
-            <h4>Round holes <span className="trace-count">{circleHoles.length}</span></h4>
-            {circleHoles.length > 0 && <ul className="trace-holes">
-              {circleHoles.map(({ hole, regionIndex, loopIndex }, index) => <li key={regionIndex + '-' + loopIndex}>
-                <span title={hole.diameter ? 'Size is fixed in mm' : 'Size follows the image scale'}>Hole {index + 1}{hole.diameter ? '' : ' · traced'}</span>
-                <MmField compact label="Ø mm" value={hole.diameter ?? (scale ? hole.circle[2] * 2 * scale : NaN)} min={0.1} max={traceLimits.width[1]}
-                  onCommit={(diameter) => setViewState((current) => ({ ...current, edited: true,
-                    regions: editLoop(current.regions, { regionIndex, loopIndex }, (loop) => ({ circle: [loop.circle[0], loop.circle[1], scale ? diameter / 2 / scale : loop.circle[2]], diameter })) }), 'hole diameter')} />
-                <Button type="button" size="icon" variant="ghost" aria-label={'Remove hole ' + (index + 1)}
-                  onClick={() => setViewState((current) => ({ ...current, edited: true, regions: editLoop(current.regions, { regionIndex, loopIndex }, () => null) }), 'removed hole')}><Trash2 size={14} /></Button>
+            <h4>Holes and pockets <span className="trace-count">{allHoles.length}</span></h4>
+            {allHoles.length > 0 && <ul className="trace-holes">
+              {allHoles.map(({ hole, regionIndex, loopIndex }, index) => <li key={regionIndex + '-' + loopIndex}>
+                <span title={hole.circle ? (hole.diameter ? 'Size is fixed in mm' : 'Size follows the image scale') : 'Traced or drawn outline'}>
+                  {hole.circle ? 'Hole' : hole.depth ? 'Pocket' : 'Cutout'} {index + 1}{hole.circle && !hole.diameter ? ' · traced' : ''}</span>
+                {hole.circle ? <MmField compact label="Ø mm" value={hole.diameter ?? (scale ? hole.circle[2] * 2 * scale : NaN)} min={0.1} max={traceLimits.width[1]}
+                  onCommit={(diameter) => setHole(regionIndex, loopIndex, (loop) => ({ ...loop, circle: [loop.circle[0], loop.circle[1], scale ? diameter / 2 / scale : loop.circle[2]], diameter }), 'hole diameter')} />
+                  : <span />}
+                {single && <MmField compact allowEmpty label="Depth" placeholder="thru" value={hole.depth ?? NaN} min={0.1} max={traceLimits.thickness[1]}
+                  onCommit={(depth) => setHole(regionIndex, loopIndex, ({ depth: _old, ...loop }) => depth && depth < depthOf(regionIndex) ? { ...loop, depth } : loop, 'hole depth')} />}
+                <Button type="button" size="icon" variant="ghost" aria-label={'Remove ' + (index + 1)}
+                  onClick={() => setHole(regionIndex, loopIndex, () => null, 'removed hole')}><Trash2 size={14} /></Button>
               </li>)}
             </ul>}
+            {single && allHoles.length > 0 && <p className="trace-note">Depth is measured from the front face. Leave it empty to cut through.</p>}
             <div className="trace-scale-points">
               <MmField label="New hole Ø (mm)" value={holeDiameter} min={0.1} max={traceLimits.width[1]} onCommit={setHoleDiameter} />
               <Button type="button" size="sm" variant="outline" aria-pressed={tool === 'hole'} onClick={() => setTool(tool === 'hole' ? 'edit' : 'hole')}><CircleDot size={14} /> Place</Button>
             </div>
           </div>
+
+          {single && view.regions.length > 1 && name === 'front' && <div className="trace-group">
+            <h4>Part heights</h4>
+            <ul className="trace-holes">
+              {view.regions.map((region, regionIndex) => <li key={regionIndex}>
+                <span>Region {regionIndex + 1}</span><span />
+                <MmField compact allowEmpty label="Height" placeholder={String(trace.shape.thickness)} value={region.height ?? NaN} min={traceLimits.thickness[0]} max={traceLimits.thickness[1]}
+                  onCommit={(height) => setViewState((current) => ({ ...current, edited: true, regions: current.regions.map((item, index) => {
+                    if (index !== regionIndex) return item
+                    const { height: _old, ...rest } = item
+                    return height ? { ...rest, height } : rest
+                  }) }), 'region height')} />
+                <span />
+              </li>)}
+            </ul>
+            <p className="trace-note">Separate outlines can stand at different heights. Empty uses the thickness.</p>
+          </div>}
         </>}
 
         <div className="trace-group">
@@ -495,8 +561,16 @@ export function TracePanel({ trace, images, result, onChange, onLive, onImport, 
             {[['extrude', multi ? 'Extrude views' : 'Extrude'], ['revolve', 'Revolve']].map(([id, label]) =>
               <Button key={id} type="button" size="sm" variant="outline" aria-pressed={trace.shape.mode === id} onClick={() => setShape({ mode: id }, 'solid type')}>{label}</Button>)}
           </div>
-          {trace.shape.mode === 'extrude' && !multi && <MmField label="Thickness (mm)" value={trace.shape.thickness} min={traceLimits.thickness[0]} max={traceLimits.thickness[1]}
-            onCommit={(thickness) => setShape({ thickness }, 'thickness')} />}
+          {trace.shape.mode === 'extrude' && !multi && <>
+            <MmField label="Thickness (mm)" value={trace.shape.thickness} min={traceLimits.thickness[0]} max={traceLimits.thickness[1]}
+              onCommit={(thickness) => setShape({ thickness }, 'thickness')} />
+            <div className="section-axes trace-mode trace-edges" aria-label="Front edges">
+              {edgeKinds.map((kind) => <Button key={kind} type="button" size="sm" variant="outline" aria-pressed={(trace.shape.edge?.kind ?? 'none') === kind}
+                onClick={() => setShape({ edge: { kind, size: trace.shape.edge?.size ?? 1 } }, 'edge finish')}>{{ none: 'Sharp edges', fillet: 'Round', chamfer: 'Chamfer' }[kind]}</Button>)}
+            </div>
+            {trace.shape.edge && trace.shape.edge.kind !== 'none' && <MmField label={(trace.shape.edge.kind === 'fillet' ? 'Round radius' : 'Chamfer size') + ' (mm)'}
+              value={trace.shape.edge.size} min={traceLimits.edge[0]} max={traceLimits.edge[1]} onCommit={(size) => setShape({ edge: { ...trace.shape.edge, size } }, 'edge size')} />}
+          </>}
           {trace.shape.mode === 'extrude' && isRoundView(trace.views.top) && <div className="trace-suggest">
             <p>The top view is round, so this looks like a turned part. Revolving the front view usually matches it more closely.</p>
             <Button type="button" size="sm" variant="outline" onClick={() => setShape({ mode: 'revolve', axis: 50 }, 'solid type')}>Use revolve</Button>

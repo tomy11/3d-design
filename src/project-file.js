@@ -1,6 +1,6 @@
-import { validateAdapter, adapterFields } from './adapter-spec'
-import { driveIds } from './drive'
-import { decodeTrace } from './trace-state'
+import { validateAdapter, adapterFields } from './adapter-spec.js'
+import { driveIds } from './drive.js'
+import { decodeTrace } from './trace-state.js'
 
 export const PROJECT_EXTENSION = 'assemblylab'
 export const desktop = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
