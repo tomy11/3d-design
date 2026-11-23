@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from 'react'
-import { CircleDot, Download, ImagePlus, MousePointer2, Ruler, RotateCcw, ScanLine, Trash2 } from 'lucide-react'
+import { Box, CircleDot, Download, Eye, EyeOff, ImagePlus, MousePointer2, Ruler, RotateCcw, RotateCw, ScanLine, Trash2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { loopContains, regionBounds, traceImage, viewLabels, viewNames, viewScale } from './trace'
 import { traceLimits } from './trace-spec'
 import { withView } from './trace-state'
+import { meshAccept } from './mesh-reference'
 
 const grab = 8
 
@@ -68,7 +69,41 @@ function MmField({ label, value, min, max, onCommit, compact = false }) {
   )
 }
 
-export function TracePanel({ trace, images, result, onChange, onLive, onImport, onBuild, onExport, building, exporting, error, upToDate }) {
+function MeshSection({ mesh, onImportMesh, onMeshSize, onMeshTurn, onMeshVisible, onMeshRemove, onViewsFromMesh }) {
+  const input = useRef(null)
+  const [busy, setBusy] = useState(false)
+  async function run(action) {
+    setBusy(true)
+    try { await action() } finally { setBusy(false) }
+  }
+  return (
+    <div className="trace-group trace-mesh">
+      <h4>Reference mesh</h4>
+      <input ref={input} type="file" accept={meshAccept} hidden onChange={(event) => { const file = event.target.files?.[0]; if (file) run(() => onImportMesh(file)); event.target.value = '' }} />
+      {!mesh && <>
+        <p className="trace-note">Import a GLB, OBJ or STL, for example from an AI image-to-3D service or a scan, then turn it into front, right and top views.</p>
+        <Button type="button" variant="outline" className="w-full" disabled={busy} onClick={() => input.current.click()}><Box size={15} /> {busy ? 'Loading mesh…' : 'Import mesh'}</Button>
+      </>}
+      {mesh && <>
+        <div className="trace-mesh-head">
+          <div className="trace-mesh-name" title={mesh.name}><strong>{mesh.name}</strong><small>{Math.round(mesh.triangles).toLocaleString()} triangles · {mesh.size.map((value) => value.toFixed(1)).join(' × ')} mm</small></div>
+          <Button type="button" size="icon" variant="ghost" aria-label={mesh.visible ? 'Hide reference mesh' : 'Show reference mesh'} onClick={() => onMeshVisible(!mesh.visible)}>{mesh.visible ? <Eye size={15} /> : <EyeOff size={15} />}</Button>
+          <Button type="button" size="icon" variant="ghost" aria-label="Remove reference mesh" onClick={onMeshRemove}><Trash2 size={15} /></Button>
+        </div>
+        <MmField label="Longest side (mm)" value={mesh.longest} min={traceLimits.width[0]} max={traceLimits.width[1]} onCommit={onMeshSize} />
+        <div className="trace-turns" aria-label="Turn mesh 90 degrees">
+          <span>Turn 90°</span>
+          {['x', 'y', 'z'].map((axis) => <Button key={axis} type="button" size="sm" variant="outline" aria-label={'Turn mesh 90 degrees around ' + axis.toUpperCase()} onClick={() => onMeshTurn(axis)}><RotateCw size={13} /> {axis.toUpperCase()}</Button>)}
+        </div>
+        <p className="trace-note">Turn the mesh until its front faces you and its top points up in the 3D view.</p>
+        <Button type="button" className="w-full" disabled={busy} onClick={() => run(onViewsFromMesh)}><ScanLine size={15} /> {busy ? 'Making views…' : 'Make front, right and top views'}</Button>
+        <Button type="button" variant="ghost" size="sm" className="w-full" disabled={busy} onClick={() => input.current.click()}>Replace mesh</Button>
+      </>}
+    </div>
+  )
+}
+
+export function TracePanel({ trace, images, result, onChange, onLive, onImport, onBuild, onExport, building, exporting, error, upToDate, ...meshProps }) {
   const name = trace.view
   const view = trace.views[name]
   const image = view ? images[view.imageId] : null
@@ -302,6 +337,7 @@ export function TracePanel({ trace, images, result, onChange, onLive, onImport, 
     <section className="panel mode-panel">
       <div className="panel-heading mode-panel-title"><ScanLine size={16} /><h2>Trace from image</h2><span className="object-count">mm</span></div>
       <div className="mode-panel-body cad-form trace-form">
+        <MeshSection {...meshProps} />
         <div className="section-axes trace-views" aria-label="Traced view">
           {viewNames.map((item) => <Button key={item} type="button" size="sm" variant="outline" aria-pressed={item === name}
             onClick={() => onLive({ ...trace, view: item })}>{viewLabels[item]}{trace.views[item] && <i className="trace-dot" aria-label="has image" />}</Button>)}

@@ -13,6 +13,8 @@ import { CadPanel, ViewPanel } from './CadPanel'
 import { TracePanel } from './TracePanel'
 import { imageFromDataUrl, loadTraceImage, traceToSpec } from './trace'
 import { createView, emptyTrace, serializeTrace, withView } from './trace-state'
+import { loadMesh, placeMesh, renderSilhouettes } from './mesh-reference'
+import { Matrix4, Vector3 } from 'three'
 import { adapterDefaults } from './adapter-spec'
 import { runCad } from './adapter-client'
 import { decodeProject, desktop, openNativeProject, readBrowserProject, saveProject, saveStep } from './project-file'
@@ -234,6 +236,11 @@ export default function App() {
   const [traceSpec, setTraceSpec] = useState(null)
   const [trace, setTrace] = useState(emptyTrace)
   const traceImages = useRef({})
+  // Reference mesh: the loaded file, its 90° turns, and the size shown in millimetres.
+  const meshBase = useRef(null)
+  const meshTurn = useRef(new Matrix4())
+  const meshPlaced = useRef(null)
+  const [mesh, setMesh] = useState(null)
   const traceResult = useMemo(() => traceToSpec(trace), [trace])
   const traceUpToDate = Boolean(traceSpec && traceResult.spec) && JSON.stringify(traceSpec) === JSON.stringify(traceResult.spec)
   const [stepExporting, setStepExporting] = useState(false)
@@ -316,6 +323,67 @@ export default function App() {
   function changeTrace(next, label, before = trace) {
     recordChange({ type: 'trace', label, before, after: next })
     setTrace(next)
+  }
+
+  function placeReference(longest, visible) {
+    const placed = placeMesh(meshBase.current, meshTurn.current, longest)
+    meshPlaced.current?.dispose()
+    meshPlaced.current = placed.geometry
+    viewport.current?.setReference(placed.geometry, visible)
+    setMesh({ name: meshBase.current.name, triangles: meshBase.current.triangles, longest, size: placed.size, visible })
+  }
+
+  async function importMesh(file) {
+    try {
+      const loaded = await loadMesh(file)
+      meshBase.current?.geometry.dispose()
+      meshBase.current = loaded
+      meshTurn.current = new Matrix4()
+      loaded.geometry.computeBoundingBox()
+      const size = loaded.geometry.boundingBox.getSize(new Vector3())
+      // Keep the file's own size when it is plausible, otherwise start at 100 mm.
+      const longest = Math.max(size.x, size.y, size.z) * loaded.mmPerUnit
+      placeReference(longest >= 1 && longest <= 5000 ? Math.round(longest * 100) / 100 : 100, true)
+      setNotice('Reference mesh loaded: ' + Math.round(loaded.triangles).toLocaleString() + ' triangles.')
+    } catch (failure) {
+      setNotice('Could not import mesh. ' + (failure?.message ?? String(failure)))
+    }
+  }
+
+  function turnMesh(axis) {
+    const rotation = new Matrix4()
+    if (axis === 'x') rotation.makeRotationX(Math.PI / 2)
+    if (axis === 'y') rotation.makeRotationY(Math.PI / 2)
+    if (axis === 'z') rotation.makeRotationZ(Math.PI / 2)
+    meshTurn.current.premultiply(rotation)
+    placeReference(mesh.longest, mesh.visible)
+  }
+
+  function removeMesh() {
+    meshBase.current?.geometry.dispose()
+    meshPlaced.current?.dispose()
+    meshBase.current = meshPlaced.current = null
+    viewport.current?.setReference(null, false)
+    setMesh(null)
+  }
+
+  // Front, right and top silhouettes of the reference mesh become traced views at true scale.
+  async function viewsFromMesh() {
+    try {
+      const shots = await renderSilhouettes(meshPlaced.current)
+      let next = trace
+      for (const [name, { blob, width }] of Object.entries(shots)) {
+        const image = await loadTraceImage(blob, mesh.name + ' ' + name + '.png')
+        const id = 'img-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6)
+        traceImages.current[id] = image
+        const view = createView(image, id)
+        next = withView(next, name, () => ({ ...view, scale: { ...view.scale, mode: 'width', width: Math.round(width * 1000) / 1000 } }))
+      }
+      changeTrace({ ...next, view: 'front', shape: { ...next.shape, mode: 'extrude' } }, 'views from mesh')
+      setNotice('Front, right and top views made from the reference mesh.')
+    } catch (failure) {
+      setNotice('Could not make views. ' + (failure?.message ?? String(failure)))
+    }
   }
 
   async function importTraceImage(name, file) {
@@ -595,6 +663,7 @@ export default function App() {
   useEffect(() => { viewport.current?.setSnap(snap) }, [ready, snap])
   useEffect(() => { viewport.current?.setMeasure(measure) }, [ready, measure])
   useEffect(() => { viewport.current?.setSection(section) }, [ready, section])
+  useEffect(() => { viewport.current?.setReference(undefined, Boolean(mesh?.visible) && cadSource === 'trace') }, [ready, mesh, cadSource])
   useEffect(() => {
     if (ready && sceneRestore) viewport.current?.restoreScene(sceneRestore)
   }, [ready, sceneRestore])
@@ -843,6 +912,8 @@ export default function App() {
             {/* Stays mounted so the imported image and point edits survive switching modes. */}
             <div hidden={workspace !== 'cad' || cadSource !== 'trace'}>
               <TracePanel trace={trace} images={traceImages.current} result={traceResult} onChange={changeTrace} onLive={setTrace} onImport={importTraceImage}
+                mesh={mesh} onImportMesh={importMesh} onMeshSize={(longest) => placeReference(longest, mesh.visible)} onMeshTurn={turnMesh}
+                onMeshVisible={(visible) => { setMesh({ ...mesh, visible }); viewport.current?.setReference(undefined, visible) }} onMeshRemove={removeMesh} onViewsFromMesh={viewsFromMesh}
                 onBuild={() => setTraceSpec(traceResult.spec)} onExport={exportAdapter} building={cadBuilding || !ready} exporting={stepExporting}
                 error={cadSource === 'trace' ? cadError : ''} upToDate={traceUpToDate && !cadBuilding && !cadError} />
             </div>

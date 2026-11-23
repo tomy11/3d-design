@@ -113,6 +113,18 @@ export async function createViewport(element, { onSelect, onSelectDrive, onChang
   adapter.name = 'Parametric flange adapter'
   adapter.visible = false
   scene.add(adapter)
+  // An imported mesh shown see-through over the traced solid, for comparison.
+  const reference = new T.Mesh(
+    new T.BufferGeometry(),
+    // Drawn slightly towards the camera so faces lying on the solid's faces do not flicker.
+    new T.MeshStandardMaterial({ color: '#f0a34a', transparent: true, opacity: 0.34, depthWrite: false, roughness: 0.6, side: T.DoubleSide,
+      polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -4 }),
+  )
+  reference.name = 'Reference mesh'
+  reference.renderOrder = 2
+  reference.visible = false
+  let referenceWanted = false
+  scene.add(reference)
   let gridEnabled = true
   let fittingAdapter = true
   let measuring = false
@@ -254,7 +266,8 @@ export async function createViewport(element, { onSelect, onSelectDrive, onChang
   function view(name) {
     const direction = new T.Vector3(...poses[name]).normalize()
     if (workspace === 'cad') {
-      if (adapter.geometry.attributes.position) frameObject(adapter, direction, 3.4)
+      if (adapter.geometry.attributes.position?.count) frameObject(adapter, direction, 3.4)
+      else if (reference.visible) frameObject(reference, direction, 3.4)
       return
     }
     if (workspace === 'service') {
@@ -402,6 +415,22 @@ export async function createViewport(element, { onSelect, onSelectDrive, onChang
     focus,
     toolReadout,
     clearMeasurement,
+    // geometry is in millimetres, or null to remove the reference mesh.
+    setReference(geometry, visible) {
+      if (geometry !== undefined && geometry !== reference.geometry) {
+        reference.geometry.dispose()
+        reference.geometry = geometry ? geometry.clone().scale(0.001, 0.001, 0.001) : new T.BufferGeometry()
+        reference.geometry.computeBoundingSphere()
+        fittingAdapter = true
+      }
+      referenceWanted = Boolean(geometry ?? reference.geometry.attributes.position) && visible
+      reference.visible = referenceWanted && workspace === 'cad'
+      if (reference.visible && fittingAdapter && !adapter.geometry.attributes.position?.count) {
+        view('perspective')
+        fittingAdapter = false
+      }
+      dirty = true
+    },
     refitAdapter() {
       fittingAdapter = true
     },
@@ -457,6 +486,7 @@ export async function createViewport(element, { onSelect, onSelectDrive, onChang
       const servicing = next === 'service'
       plant.visible = next !== 'cad'
       adapter.visible = next === 'cad'
+      reference.visible = referenceWanted && next === 'cad'
       fittingAdapter = true
       sceneGrid()
       if (measuring) clearMeasurement()

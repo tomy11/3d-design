@@ -382,3 +382,12 @@ kbd { font: 11px var(--mono); border: 1px solid var(--line); border-radius: 4px;
 .trace-holes li { display: flex; align-items: center; justify-content: space-between; gap: 6px; font-size: 12px; color: #c8d4e9; }
 .trace-count { margin-left: 4px; color: var(--subtle); font: 11px var(--mono); }
 .trace-warning { margin: 0; padding: 6px 8px; border-radius: 5px; background: #3a3020; color: #f1d7a8; font-size: 12px; line-height: 1.4; }
+.trace-mesh { padding-top: 0; border-top: 0; }
+.trace-mesh-head { display: flex; align-items: center; gap: 2px; min-width: 0; }
+.trace-mesh-name { display: grid; flex: 1; min-width: 0; }
+.trace-mesh-head strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #d7e0f1; font-size: 13px; font-weight: 600; }
+.trace-mesh-head small { color: var(--subtle); font: 11px var(--mono); }
+.trace-turns { display: flex; align-items: center; gap: 4px; }
+.trace-turns span { flex: 1; color: #c8d4e9; font-size: 12px; font-weight: 590; }
+.trace-turns button { gap: 4px; font: 600 12px var(--mono); }
+.trace-mesh + .trace-views { margin-top: 4px; padding-top: 10px; border-top: 1px solid var(--rule); }
