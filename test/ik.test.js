@@ -66,3 +66,45 @@ test('solvePose respects joint limits', () => {
   const result = solvePose({ pose: arm.pose, start: [0, -90, 100, -90, -90, 0], target, limits: [360, 360, 120, 360, 360, 360] })
   assert.ok(Math.abs(result.angles[2]) <= 120)
 })
+
+// The UR10e's own kinematic chain (as src/robot.js builds it), without meshes.
+function makeUr10e() {
+  const identity = [0, 0, 0]
+  const origins = [
+    [[0, 0, 0.1807], identity], [[0, 0, 0], [1.570796327, 0, 0]], [[-0.6127, 0, 0], identity],
+    [[-0.57155, 0, 0.17415], identity], [[0, -0.11985, 0], [1.570796327, 0, 0]], [[0, 0.11655, 0], [1.570796326589793, Math.PI, Math.PI]],
+  ]
+  const group = (parent) => { const child = new T.Group(); parent.add(child); return child }
+  const apply = (object, [position, rpy]) => { object.position.set(...position); object.rotation.set(...rpy, 'ZYX') }
+  const root = new T.Group()
+  const basis = group(root)
+  basis.rotation.x = -Math.PI / 2
+  let parent = group(basis)
+  parent.rotation.z = Math.PI
+  const pivots = origins.map((origin) => {
+    const mount = group(parent)
+    apply(mount, origin)
+    const pivot = group(mount)
+    parent = group(pivot)
+    return pivot
+  })
+  const flange = group(parent)
+  apply(flange, [identity, [0, -Math.PI / 2, -Math.PI / 2]])
+  const tool = group(flange)
+  apply(tool, [identity, [Math.PI / 2, 0, Math.PI / 2]])
+  return (angles) => {
+    pivots.forEach((pivot, index) => { pivot.rotation.z = T.MathUtils.degToRad(angles[index]) })
+    root.updateMatrixWorld(true)
+    return tool.matrixWorld.clone()
+  }
+}
+
+test('on the UR10e, steps along the tool axis converge quickly', () => {
+  const pose = makeUr10e()
+  const start = [-2.1, -74.5, 109.4, -64.3, 59.8, 23.6]
+  for (const [x, y, z] of [[0, 0, 0.01], [0, 0, -0.05], [0.02, 0, 0], [0, -0.03, 0]]) {
+    const target = pose(start).multiply(new T.Matrix4().makeTranslation(x, y, z))
+    const result = solvePose({ pose, start, target, limits: [360, 360, 160, 360, 360, 360], iterations: 30 })
+    assert.ok(result.converged, 'tool step ' + [x, y, z] + ' left ' + result.position + ' m')
+  }
+})

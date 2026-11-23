@@ -348,6 +348,27 @@ export default function App() {
     setOverrides((previous) => ({ ...previous, [index]: angle }))
   }
 
+  // Moves the TCP by inverse kinematics; the joints change only when the pose is reachable.
+  function applyTcpSolution(result, what) {
+    if (!result) return false
+    if (!result.converged) {
+      setNotice(what + ' is out of reach' + (result.position > 1e-4 ? ' (' + (result.position * 1000).toFixed(1) + ' mm short)' : '') + '. The arm did not move.')
+      return false
+    }
+    setPlaying(false)
+    editRevision.current += 1
+    setOverrides(Object.fromEntries(result.angles.map((angle, index) => [index, angle])))
+    return true
+  }
+
+  function moveTcp(target) {
+    return applyTcpSolution(viewport.current?.solveTcpTarget(pose, target), 'That TCP pose')
+  }
+
+  function jogTcp(jog) {
+    return applyTcpSolution(viewport.current?.jogTcp(pose, jog), 'The next step')
+  }
+
   function togglePlayback() {
     if (!canPlay) return
     if (!playing) setOverrides({})
@@ -709,8 +730,9 @@ export default function App() {
                   error={cadSource === 'trace' ? cadError : ''} upToDate={traced.traceUpToDate && !cadBuilding && !cadError} />
               </Suspense>
             </div>}
-            {(workspace === 'teach' || workspace === 'pick') && <ToolFrame values={toolValues} axes={showAxes} setAxes={setShowAxes} pick={workspace === 'pick'} />}
-            {workspace === 'teach' && <TeachPanels {...{ pose, setJoint, frame, ready }} keys={taught} onSeek={(at) => { setPlaying(false); seek(at) }} onSave={savePose} onDelete={deletePose} />}
+            {(workspace === 'teach' || workspace === 'pick') && <ToolFrame values={toolValues} axes={showAxes} setAxes={setShowAxes} pick={workspace === 'pick'}
+              onTarget={workspace === 'teach' && ready ? moveTcp : null} />}
+            {workspace === 'teach' && <TeachPanels {...{ pose, setJoint, frame, ready }} onJog={jogTcp} keys={taught} onSeek={(at) => { setPlaying(false); seek(at) }} onSave={savePose} onDelete={deletePose} />}
             {workspace === 'pick' && <PickPanel frame={frame} seek={(at) => { setPlaying(false); seek(at) }}
               mount={toolMount} onMount={setToolMount} retarget={retarget} onRetarget={setRetarget} clearance={clearance} />}
             {workspace === 'service' && <ServicePanels joint={serviceJoint} setJoint={setServiceJoint} separation={separation} setSeparation={setSeparation}

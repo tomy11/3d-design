@@ -405,3 +405,10 @@ kbd { font: 11px var(--mono); border: 1px solid var(--line); border-radius: 4px;
 .clearance-ok svg, .clearance-warning svg { flex: none; margin-top: 2px; }
 .clearance-list button i { border-color: #f0a062; }
 .clearance-list button[aria-current="step"] i { background: #e5684c; border-color: #e5684c; }
+.tool-metric.editable input { width: 100%; min-width: 0; padding: 0; border: 0; background: transparent; color: var(--text); font: 680 12px var(--mono); outline: none; }
+.tool-metric.editable:focus-within { border-color: var(--accent); }
+.tcp-jog { display: grid; gap: 8px; }
+.tcp-jog .section-axes button { font-size: 11px; padding-inline: 4px; }
+.jog-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
+.jog-row { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 4px; text-align: center; font: 12px var(--mono); }
+.jog-row button { width: 28px; height: 28px; }

@@ -354,6 +354,31 @@ export async function createViewport(element, { onSelect, onSelectDrive, onChang
     }
   }
 
+  // Solves joints from start so the TCP (tool0, or the gripper TCP in Pick & Place) reaches a pose
+  // given in robot base coordinates as a Matrix4 in metres. The robot is left as it was.
+  function solveTcp(start, baseTarget) {
+    const saved = pivots.map((joint) => T.MathUtils.radToDeg(joint.rotation.z))
+    robot.basis.updateWorldMatrix(true, false)
+    const target = new T.Matrix4().multiplyMatrices(robot.basis.matrixWorld, baseTarget)
+    const offset = new T.Matrix4().makeTranslation(0, 0, workspace === 'pick' ? pinchOffset + standoff : 0)
+    const result = solvePose({
+      pose: (angles) => {
+        robot.setAngles(angles)
+        robot.tool.updateWorldMatrix(true, false)
+        return robot.tool.matrixWorld.clone().multiply(offset)
+      },
+      start, target, limits: joints.map(({ limit }) => limit),
+    })
+    robot.setAngles(saved)
+    return result
+  }
+
+  // The TCP pose in base coordinates for a readout-style { position mm, rotation ° }.
+  function tcpMatrix({ position, rotation }) {
+    const quaternion = new T.Quaternion().setFromEuler(new T.Euler(...rotation.map(T.MathUtils.degToRad), readEuler.order))
+    return new T.Matrix4().compose(new T.Vector3(...position.map((value) => value / 1000)), quaternion, new T.Vector3(1, 1, 1))
+  }
+
   function robotPoseReadout() {
     const { position, rotation } = toolReadout()
     return {
@@ -500,6 +525,31 @@ export async function createViewport(element, { onSelect, onSelectDrive, onChang
     focus,
     toolReadout,
     robotPoseReadout,
+    // Joints that put the TCP at { position mm, rotation ° } in base coordinates, from start angles.
+    solveTcpTarget(start, target) {
+      return solveTcp(start, tcpMatrix(target))
+    },
+    // Joints that move the TCP by amount (mm or °) along or about one axis of the base or tool frame.
+    jogTcp(start, { axis, amount, frame = 'base' }) {
+      const saved = pivots.map((joint) => T.MathUtils.radToDeg(joint.rotation.z))
+      robot.setAngles(start)
+      const current = tcpMatrix(toolReadout())
+      robot.setAngles(saved)
+      const direction = new T.Vector3(axis.endsWith('x') ? 1 : 0, axis.endsWith('y') ? 1 : 0, axis.endsWith('z') ? 1 : 0)
+      const turning = axis.startsWith('r')
+      const delta = turning
+        ? new T.Matrix4().makeRotationAxis(direction, T.MathUtils.degToRad(amount))
+        : new T.Matrix4().makeTranslation(direction.multiplyScalar(amount / 1000))
+      let target
+      if (frame === 'tool') target = current.clone().multiply(delta)
+      else if (!turning) target = delta.clone().multiply(current)
+      else {
+        // Turn about the base axis while keeping the TCP where it is.
+        const at = new T.Vector3().setFromMatrixPosition(current)
+        target = new T.Matrix4().makeTranslation(at).multiply(delta).multiply(new T.Matrix4().makeTranslation(at.clone().negate())).multiply(current)
+      }
+      return solveTcp(start, target)
+    },
     sceneReadout,
     clearMeasurement,
     // geometry is in millimetres, or null to remove the reference mesh.

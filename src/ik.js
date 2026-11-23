@@ -60,19 +60,21 @@ export function solvePose({ pose, start, target, limits, iterations = 200, dampi
   let current = measure(angles)
   for (let iteration = 0; iteration < iterations; iteration++) {
     if (current.position < positionTolerance && current.rotation < rotationTolerance) break
-    // Jacobian columns: how the 6-vector error changes per degree of each joint.
+    // Jacobian columns: how the 6-vector error changes per radian of each joint. Radians keep its
+    // entries near 1 (metres and radians), so the damping term stays small beside them.
+    const radians = T.MathUtils.degToRad(step)
     const jacobian = angles.map((_, joint) => {
       const nudged = [...angles]
       nudged[joint] += step
       const error = poseError(pose(nudged), target)
-      return error.map((value, row) => (current.error[row] - value) / step)
+      return error.map((value, row) => (current.error[row] - value) / radians)
     })
     // Damped least squares: dq = Jᵀ (J Jᵀ + λ² I)⁻¹ e, with J as 6 rows by n joints.
     const rows = 6
     const jjt = Array.from({ length: rows }, (_, i) => Array.from({ length: rows }, (_, j) =>
       jacobian.reduce((sum, column) => sum + column[i] * column[j], 0) + (i === j ? damping * damping : 0)))
     const y = solveLinear(jjt, current.error)
-    const change = jacobian.map((column) => column.reduce((sum, value, row) => sum + value * y[row], 0))
+    const change = jacobian.map((column) => T.MathUtils.radToDeg(column.reduce((sum, value, row) => sum + value * y[row], 0)))
     // Never jump more than 10° in one step, so the solution stays on the same arm configuration.
     const largest = Math.max(...change.map(Math.abs))
     const limit = largest > 10 ? 10 / largest : 1

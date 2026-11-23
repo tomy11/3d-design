@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { AlertTriangle, Axis3D, Box, CheckCircle2, ChevronDown, ChevronRight, Download, Eye, EyeOff, Layers3, Plus, ScanLine, SlidersHorizontal, Trash2, Wrench } from 'lucide-react'
+import { AlertTriangle, Axis3D, Box, CheckCircle2, ChevronDown, ChevronRight, Minus, Move3D, Download, Eye, EyeOff, Layers3, Plus, ScanLine, SlidersHorizontal, Trash2, Wrench } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { joints } from './robot'
 import { driveIndex, drivePieceCount, driveTree } from './drive'
@@ -10,19 +10,39 @@ function PanelTitle({ icon: Icon, children, aside }) {
   return <div className="panel-heading mode-panel-title"><Icon size={16} /><h2>{children}</h2>{aside && <span className="object-count">{aside}</span>}</div>
 }
 
-export function ToolFrame({ values, axes, setAxes, pick = false }) {
+// A TCP value that can be typed over: Enter moves the arm there, Escape cancels.
+function TcpField({ label, unit, value, onCommit }) {
+  const [draft, setDraft] = useState(null)
+  return (
+    <label className="tool-metric editable"><span>{label} <small>{unit}</small></span>
+      <input inputMode="decimal" aria-label={'Target ' + label + ' ' + unit} value={draft ?? (value?.toFixed(1) ?? '')}
+        onFocus={(event) => event.target.select()} onChange={(event) => setDraft(event.target.value)}
+        onBlur={() => {
+          const number = Number(draft)
+          if (draft !== null && draft.trim() && Number.isFinite(number) && Math.abs(number - value) > 1e-6) onCommit(number)
+          setDraft(null)
+        }}
+        onKeyDown={(event) => { if (event.key === 'Enter') event.target.blur(); if (event.key === 'Escape') { setDraft(null); event.target.blur() } }} />
+    </label>
+  )
+}
+
+export function ToolFrame({ values, axes, setAxes, pick = false, onTarget = null }) {
   return (
     <section className="panel mode-panel">
       <PanelTitle icon={Axis3D}>{pick ? 'Gripper TCP' : 'Tool frame · tool0'}</PanelTitle>
       <div className="mode-panel-body">
         <div className="tool-grid">
-          {[[values?.position, 'mm', ['X', 'Y', 'Z']], [values?.rotation, '°', ['Rx', 'Ry', 'Rz']]].map(([numbers, unit, labels]) =>
-            labels.map((label, index) => <div className="tool-metric" key={label}>
-              <span>{label} <small>{unit}</small></span><strong>{numbers ? numbers[index].toFixed(1) : '—'}</strong>
-            </div>),
+          {[[values?.position, 'mm', ['X', 'Y', 'Z'], 'position'], [values?.rotation, '°', ['Rx', 'Ry', 'Rz'], 'rotation']].map(([numbers, unit, labels, kind]) =>
+            labels.map((label, index) => onTarget && values
+              ? <TcpField key={label} label={label} unit={unit} value={numbers[index]}
+                onCommit={(number) => onTarget({ ...values, [kind]: values[kind].map((item, at) => at === index ? number : item) })} />
+              : <div className="tool-metric" key={label}>
+                <span>{label} <small>{unit}</small></span><strong>{numbers ? numbers[index].toFixed(1) : '—'}</strong>
+              </div>),
           )}
         </div>
-        <div className="tool-note"><span>Robot base coordinates</span>
+        <div className="tool-note"><span>{onTarget ? 'Type a value to move the TCP there' : 'Robot base coordinates'}</span>
           <Button size="sm" variant="ghost" className="axes-button" aria-pressed={axes} onClick={() => setAxes(!axes)}><Axis3D size={14} /> Axes</Button>
         </div>
       </div>
@@ -30,10 +50,51 @@ export function ToolFrame({ values, axes, setAxes, pick = false }) {
   )
 }
 
-export function TeachPanels({ pose, setJoint, frame, keys, onSave, onDelete, onSeek, ready }) {
+const jogSteps = { position: [1, 10, 50], rotation: [1, 5, 15] }
+
+// Steps the TCP along or about the base or tool axes; inverse kinematics finds the joints.
+function TcpJog({ onJog, ready }) {
+  const [frame, setFrame] = useState('base')
+  const [step, setStep] = useState(1)
+  return (
+    <section className="panel mode-panel">
+      <PanelTitle icon={Move3D}>Move TCP</PanelTitle>
+      <div className="mode-panel-body tcp-jog">
+        <div className="section-axes trace-mode" aria-label="Jog frame">
+          {[['base', 'Base frame'], ['tool', 'Tool frame']].map(([id, label]) =>
+            <Button key={id} type="button" size="sm" variant="outline" aria-pressed={frame === id} onClick={() => setFrame(id)}>{label}</Button>)}
+        </div>
+        <div className="section-axes" aria-label="Jog step">
+          {jogSteps.position.map((value, index) => <Button key={value} type="button" size="sm" variant="outline" aria-pressed={step === index} onClick={() => setStep(index)}>
+            {value} mm · {jogSteps.rotation[index]}°</Button>)}
+        </div>
+        <div className="jog-grid">
+          {['x', 'y', 'z', 'rx', 'ry', 'rz'].map((axis) => {
+            const turning = axis.startsWith('r')
+            const amount = jogSteps[turning ? 'rotation' : 'position'][step]
+            const name = turning ? 'R' + axis[1] : axis.toUpperCase()
+            return (
+              <div key={axis} className="jog-row">
+                <Button type="button" size="icon" variant="outline" disabled={!ready} aria-label={'Move ' + name + ' minus ' + amount + (turning ? '°' : ' mm')}
+                  onClick={() => onJog({ axis, amount: -amount, frame })}><Minus size={14} /></Button>
+                <span className={'axis axis-' + axis.at(-1)}>{name}</span>
+                <Button type="button" size="icon" variant="outline" disabled={!ready} aria-label={'Move ' + name + ' plus ' + amount + (turning ? '°' : ' mm')}
+                  onClick={() => onJog({ axis, amount, frame })}><Plus size={14} /></Button>
+              </div>
+            )
+          })}
+        </div>
+        <p className="mode-copy">Each step solves the joints by inverse kinematics. Unreachable steps leave the arm where it is.</p>
+      </div>
+    </section>
+  )
+}
+
+export function TeachPanels({ pose, setJoint, frame, keys, onSave, onDelete, onSeek, onJog, ready }) {
   const frameIsSaved = keys.some((key) => key.frame === frame)
   return (
     <>
+      <TcpJog onJog={onJog} ready={ready} />
       <section className="panel mode-panel">
         <PanelTitle icon={SlidersHorizontal}>Joint controls</PanelTitle>
         <div className="mode-panel-body joint-console">
