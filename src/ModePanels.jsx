@@ -52,9 +52,25 @@ export function ToolFrame({ values, axes, setAxes, pick = false, onTarget = null
 
 const jogSteps = { position: [1, 10, 50], rotation: [1, 5, 15] }
 
+// A button that acts once on press, then repeats while held. Keyboard presses act once.
+function RepeatButton({ onRepeat, ...props }) {
+  const timer = useRef(null)
+  const stop = () => { clearTimeout(timer.current); timer.current = null }
+  useEffect(() => stop, [])
+  function start(event) {
+    if (event.button !== 0) return
+    try { event.currentTarget.setPointerCapture(event.pointerId) } catch { /* the pointer may already be gone */ }
+    onRepeat()
+    const repeat = (delay) => { timer.current = setTimeout(() => { onRepeat(); repeat(90) }, delay) }
+    repeat(380)
+  }
+  return <Button {...props} onPointerDown={start} onPointerUp={stop} onPointerCancel={stop} onLostPointerCapture={stop}
+    onClick={(event) => { if (event.detail === 0) onRepeat() }} />
+}
+
 // Steps the TCP along or about the base or tool axes; inverse kinematics finds the joints.
-function TcpJog({ onJog, ready }) {
-  const [frame, setFrame] = useState('base')
+function TcpJog({ onJog, ready, control, setControl }) {
+  const { frame, handle } = control
   const [step, setStep] = useState(1)
   return (
     <section className="panel mode-panel">
@@ -62,7 +78,11 @@ function TcpJog({ onJog, ready }) {
       <div className="mode-panel-body tcp-jog">
         <div className="section-axes trace-mode" aria-label="Jog frame">
           {[['base', 'Base frame'], ['tool', 'Tool frame']].map(([id, label]) =>
-            <Button key={id} type="button" size="sm" variant="outline" aria-pressed={frame === id} onClick={() => setFrame(id)}>{label}</Button>)}
+            <Button key={id} type="button" size="sm" variant="outline" aria-pressed={frame === id} onClick={() => setControl({ ...control, frame: id })}>{label}</Button>)}
+        </div>
+        <div className="section-axes" aria-label="Drag handle in the viewport">
+          {[['translate', 'Drag to move'], ['rotate', 'Drag to turn'], [null, 'No handle']].map(([id, label]) =>
+            <Button key={label} type="button" size="sm" variant="outline" aria-pressed={handle === id} onClick={() => setControl({ ...control, handle: id })}>{label}</Button>)}
         </div>
         <div className="section-axes" aria-label="Jog step">
           {jogSteps.position.map((value, index) => <Button key={value} type="button" size="sm" variant="outline" aria-pressed={step === index} onClick={() => setStep(index)}>
@@ -75,26 +95,26 @@ function TcpJog({ onJog, ready }) {
             const name = turning ? 'R' + axis[1] : axis.toUpperCase()
             return (
               <div key={axis} className="jog-row">
-                <Button type="button" size="icon" variant="outline" disabled={!ready} aria-label={'Move ' + name + ' minus ' + amount + (turning ? '°' : ' mm')}
-                  onClick={() => onJog({ axis, amount: -amount, frame })}><Minus size={14} /></Button>
+                <RepeatButton type="button" size="icon" variant="outline" disabled={!ready} aria-label={'Move ' + name + ' minus ' + amount + (turning ? '°' : ' mm')}
+                  onRepeat={() => onJog({ axis, amount: -amount })}><Minus size={14} /></RepeatButton>
                 <span className={'axis axis-' + axis.at(-1)}>{name}</span>
-                <Button type="button" size="icon" variant="outline" disabled={!ready} aria-label={'Move ' + name + ' plus ' + amount + (turning ? '°' : ' mm')}
-                  onClick={() => onJog({ axis, amount, frame })}><Plus size={14} /></Button>
+                <RepeatButton type="button" size="icon" variant="outline" disabled={!ready} aria-label={'Move ' + name + ' plus ' + amount + (turning ? '°' : ' mm')}
+                  onRepeat={() => onJog({ axis, amount })}><Plus size={14} /></RepeatButton>
               </div>
             )
           })}
         </div>
-        <p className="mode-copy">Each step solves the joints by inverse kinematics. Unreachable steps leave the arm where it is.</p>
+        <p className="mode-copy">Hold a button to keep moving, or drag the handle on the TCP in the viewport. Inverse kinematics finds the joints; unreachable moves stop at the last reachable pose.</p>
       </div>
     </section>
   )
 }
 
-export function TeachPanels({ pose, setJoint, frame, keys, onSave, onDelete, onSeek, onJog, ready }) {
+export function TeachPanels({ pose, setJoint, frame, keys, onSave, onDelete, onSeek, onJog, tcpControl, setTcpControl, ready }) {
   const frameIsSaved = keys.some((key) => key.frame === frame)
   return (
     <>
-      <TcpJog onJog={onJog} ready={ready} />
+      <TcpJog onJog={onJog} ready={ready} control={tcpControl} setControl={setTcpControl} />
       <section className="panel mode-panel">
         <PanelTitle icon={SlidersHorizontal}>Joint controls</PanelTitle>
         <div className="mode-panel-body joint-console">

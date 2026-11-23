@@ -13,7 +13,7 @@ import gripperNotice from '../public/models/robotiq-license.txt?raw'
 const axes = ['x', 'y', 'z']
 const poses = { perspective: [2.05, 2.1, 6.1], top: [0, 1, 0.001], right: [1, 0, 0], front: [0, 0, 1] }
 
-export async function createViewport(element, { onSelect, onSelectDrive, onChange, onTransform, onMeasure, onOrbit, signal }) {
+export async function createViewport(element, { onSelect, onSelectDrive, onChange, onTransform, onMeasure, onOrbit, onTcpMove = () => {}, signal }) {
   const [robot, gripper] = await Promise.all([loadRobot(), loadGripper()])
   signal.throwIfAborted()
   const { plant, objects, pivots, visuals } = robot
@@ -225,6 +225,48 @@ export async function createViewport(element, { onSelect, onSelectDrive, onChang
     onChange()
   })
   scene.add(gizmo.getHelper())
+
+  // Teach mode: a handle on the TCP. Dragging it solves the joints by inverse kinematics.
+  const tcpTarget = new T.Object3D()
+  tcpTarget.name = 'TCP drag target'
+  scene.add(tcpTarget)
+  const tcpHandle = new TransformControls(camera, renderer.domElement)
+  tcpHandle.setSize(0.6)
+  tcpHandle.attach(tcpTarget)
+  const tcpHelper = tcpHandle.getHelper()
+  tcpHelper.visible = false
+  tcpHandle.enabled = false
+  scene.add(tcpHelper)
+  let tcpReachable = true
+  function syncTcpTarget() {
+    robot.tool.updateWorldMatrix(true, false)
+    robot.tool.matrixWorld.decompose(tcpTarget.position, tcpTarget.quaternion, tcpTarget.scale)
+    tcpTarget.scale.set(1, 1, 1)
+  }
+  tcpHandle.addEventListener('dragging-changed', (event) => {
+    orbit.enabled = !event.value
+    if (!event.value) {
+      // Snap back onto the real TCP, which stopped at the last reachable pose.
+      syncTcpTarget()
+      if (!tcpReachable) onTcpMove(null)
+      tcpReachable = true
+      dirty = true
+    }
+  })
+  tcpHandle.addEventListener('change', () => { dirty = true })
+  tcpHandle.addEventListener('objectChange', () => {
+    if (!tcpHandle.dragging) return
+    const start = pivots.map((joint) => T.MathUtils.radToDeg(joint.rotation.z))
+    robot.basis.updateWorldMatrix(true, false)
+    tcpTarget.updateMatrixWorld()
+    const baseTarget = new T.Matrix4().copy(robot.basis.matrixWorld).invert().multiply(tcpTarget.matrixWorld)
+    const result = solveTcp(start, baseTarget)
+    tcpReachable = result.converged
+    if (!result.converged) return
+    robot.setAngles(result.angles)
+    dirty = true
+    onTcpMove(result.angles)
+  })
 
   let selected = 'upperarm'
   let mode = 'select'
@@ -461,7 +503,7 @@ export async function createViewport(element, { onSelect, onSelectDrive, onChang
   let pointerDown
   function begin(event) {
     if (event.button !== 0) return
-    pointerDown = { x: event.clientX, y: event.clientY, gizmo: gizmo.dragging }
+    pointerDown = { x: event.clientX, y: event.clientY, gizmo: gizmo.dragging || (tcpHandle.enabled && (tcpHandle.dragging || tcpHandle.axis !== null)) }
   }
   function pick(event) {
     const start = pointerDown
@@ -660,9 +702,21 @@ export async function createViewport(element, { onSelect, onSelectDrive, onChang
       toolAxes.visible = visible && (workspace === 'teach' || workspace === 'pick')
       dirty = true
     },
+    // mode is 'translate', 'rotate' or null to hide; space is 'world' (base axes) or 'local' (tool axes).
+    setTcpHandle(mode, space = 'world') {
+      const shown = Boolean(mode) && workspace === 'teach'
+      tcpHandle.enabled = tcpHelper.visible = shown
+      // A hidden handle must not keep the axis it was last hovered on.
+      if (!shown) tcpHandle.axis = null
+      if (mode) tcpHandle.setMode(mode)
+      tcpHandle.setSpace(space)
+      if (shown) syncTcpTarget()
+      dirty = true
+    },
     setPose(angles, frame) {
       dirty = true
       robot.setAngles(angles)
+      if (!tcpHandle.dragging) syncTcpTarget()
       robotFrame = frame
       if (workspace === 'pick') {
         pickCell.update(frame)
@@ -824,6 +878,7 @@ export async function createViewport(element, { onSelect, onSelectDrive, onChang
       observer.disconnect()
       orbit.dispose()
       gizmo.dispose()
+      tcpHandle.dispose()
       drive.dispose()
       const materials = new Set([ghost])
       for (const value of externalMeshes.values()) for (const material of [value].flat()) materials.add(material)

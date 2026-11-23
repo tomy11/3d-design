@@ -78,6 +78,9 @@ export default function App() {
   const [taught, setTaught] = useState(readTaughtProgram)
   const [toolValues, setToolValues] = useState(null)
   // Pick & Place can mount the current CAD part on the flange and check the program for collisions.
+  // Teach mode TCP control: the drag handle's mode and the frame for handle and jog steps.
+  const [tcpControl, setTcpControl] = useState({ handle: 'translate', frame: 'base' })
+  const poseRef = useRef(null)
   const [toolMount, setToolMount] = useState(false)
   const [retarget, setRetarget] = useState(false)
   const [clearance, setClearance] = useState(null)
@@ -113,6 +116,7 @@ export default function App() {
   })
   const [error, setError] = useState(false)
   const frameRef = useRef(0)
+  const dragTcpRef = useRef(() => {})
   const overridesRef = useRef({})
   const cameraMoved = useRef(false)
   const program = workspace === 'teach' ? taught : workspace === 'pick' ? pickKeys : keyframes
@@ -123,6 +127,8 @@ export default function App() {
     if (workspace === 'service') return servicePose
     return sampleProgram(program, frame).map((angle, index) => overrides[index] ?? angle)
   }, [workspace, servicePose, program, frame, overrides])
+  poseRef.current = pose
+  dragTcpRef.current = dragTcp
 
   function recordChange(change) {
     if (JSON.stringify(change.before) === JSON.stringify(change.after)) return
@@ -362,11 +368,22 @@ export default function App() {
   }
 
   function moveTcp(target) {
-    return applyTcpSolution(viewport.current?.solveTcpTarget(pose, target), 'That TCP pose')
+    return applyTcpSolution(viewport.current?.solveTcpTarget(poseRef.current, target), 'That TCP pose')
   }
 
+  // Reads the latest pose, so repeated steps while a button is held keep adding up.
   function jogTcp(jog) {
-    return applyTcpSolution(viewport.current?.jogTcp(pose, jog), 'The next step')
+    return applyTcpSolution(viewport.current?.jogTcp(poseRef.current, { ...jog, frame: tcpControl.frame }), 'The next step')
+  }
+
+  function dragTcp(angles) {
+    if (!angles) {
+      setNotice('That point is out of reach. The arm stopped at the last reachable pose.')
+      return
+    }
+    setPlaying(false)
+    editRevision.current += 1
+    setOverrides(Object.fromEntries(angles.map((angle, index) => [index, angle])))
   }
 
   function togglePlayback() {
@@ -396,6 +413,7 @@ export default function App() {
       onTransform: (change) => recordChange({ ...change, type: 'transform', label: 'object transform' }),
       onChange: () => setTransformVersion((version) => version + 1),
       onOrbit: () => { cameraMoved.current = true; setView('orbit') },
+      onTcpMove: (angles) => dragTcpRef.current(angles),
     }).then((api) => {
       if (controller.signal.aborted) {
         api.dispose()
@@ -429,6 +447,9 @@ export default function App() {
   useEffect(() => { viewport.current?.setWireframe(wireframe && workspace === 'inspect') }, [ready, wireframe, workspace])
   useEffect(() => { viewport.current?.setGrid(grid) }, [ready, grid])
   useEffect(() => { viewport.current?.setToolAxes(showAxes) }, [ready, showAxes])
+  useEffect(() => {
+    viewport.current?.setTcpHandle(workspace === 'teach' ? tcpControl.handle : null, tcpControl.frame === 'tool' ? 'local' : 'world')
+  }, [ready, workspace, tcpControl])
   useEffect(() => {
     if (workspace === 'inspect') viewport.current?.setExplosion(explosion, false)
   }, [ready, workspace, explosion])
@@ -732,7 +753,7 @@ export default function App() {
             </div>}
             {(workspace === 'teach' || workspace === 'pick') && <ToolFrame values={toolValues} axes={showAxes} setAxes={setShowAxes} pick={workspace === 'pick'}
               onTarget={workspace === 'teach' && ready ? moveTcp : null} />}
-            {workspace === 'teach' && <TeachPanels {...{ pose, setJoint, frame, ready }} onJog={jogTcp} keys={taught} onSeek={(at) => { setPlaying(false); seek(at) }} onSave={savePose} onDelete={deletePose} />}
+            {workspace === 'teach' && <TeachPanels {...{ pose, setJoint, frame, ready }} onJog={jogTcp} tcpControl={tcpControl} setTcpControl={setTcpControl} keys={taught} onSeek={(at) => { setPlaying(false); seek(at) }} onSave={savePose} onDelete={deletePose} />}
             {workspace === 'pick' && <PickPanel frame={frame} seek={(at) => { setPlaying(false); seek(at) }}
               mount={toolMount} onMount={setToolMount} retarget={retarget} onRetarget={setRetarget} clearance={clearance} />}
             {workspace === 'service' && <ServicePanels joint={serviceJoint} setJoint={setServiceJoint} separation={separation} setSeparation={setSeparation}
