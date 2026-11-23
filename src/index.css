@@ -341,3 +341,7 @@ kbd { font: 12px var(--mono); border: 1px solid #d8dacf; border-radius: 4px; pad
   .viewport-actions .vertical-rule { display: none; }
   .viewport-actions button { width: 27px; }
 }
+@media (max-width: 540px) {
+  .header-actions .export-button { width: 32px; padding: 0; }
+  .header-actions .export-button span { display: none; }
+}

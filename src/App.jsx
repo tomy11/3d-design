@@ -600,7 +600,7 @@ export default function App() {
             <IconButton label="Open project" disabled={!ready || projectBusy} onClick={() => openProject()}><FolderOpen size={17} /></IconButton>
             <IconButton label="Save project" disabled={!ready || projectBusy} onClick={writeProject}><Save size={17} /></IconButton>
             <Button variant="ghost" aria-label="Controls" onClick={() => dialog.current.showModal()} className="help-button"><CircleHelp size={17} /><span>Controls</span></Button>
-            <Button variant="outline" onClick={workspace === 'cad' ? exportAdapter : exportScene} disabled={!ready || exporting || (workspace === 'cad' && (cadBuilding || stepExporting || Boolean(cadError)))} className="export-button"><Download size={16} /><span>{exporting || stepExporting ? 'Exporting…' : workspace === 'cad' ? 'Export STEP' : 'Export GLB'}</span></Button>
+            <Button variant="outline" aria-label={workspace === 'cad' ? 'Export STEP' : 'Export GLB'} onClick={workspace === 'cad' ? exportAdapter : exportScene} disabled={!ready || exporting || (workspace === 'cad' && (cadBuilding || stepExporting || Boolean(cadError)))} className="export-button"><Download size={16} /><span>{exporting || stepExporting ? 'Exporting…' : workspace === 'cad' ? 'Export STEP' : 'Export GLB'}</span></Button>
           </div>
         </div>
       </header>
