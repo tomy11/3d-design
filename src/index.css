@@ -397,3 +397,11 @@ kbd { font: 11px var(--mono); border: 1px solid var(--line); border-radius: 4px;
 .trace-suggest button { justify-self: start; }
 .trace-holes .mm-field.compact { grid-template-columns: auto 58px; }
 .trace-edges { grid-template-columns: repeat(3, 1fr); }
+.tool-mount { display: grid; gap: 7px; padding-top: 10px; border-top: 1px solid var(--line, rgba(255,255,255,0.08)); }
+.tool-mount h4 { margin: 0; font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--subtle); }
+.clearance-ok, .clearance-warning { display: flex; gap: 6px; align-items: flex-start; margin: 0; font-size: 12px; line-height: 1.45; }
+.clearance-ok { color: #6fd3a8; }
+.clearance-warning { color: #f0a062; }
+.clearance-ok svg, .clearance-warning svg { flex: none; margin-top: 2px; }
+.clearance-list button i { border-color: #f0a062; }
+.clearance-list button[aria-current="step"] i { background: #e5684c; border-color: #e5684c; }

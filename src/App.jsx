@@ -77,6 +77,9 @@ export default function App() {
   const [workspace, setWorkspace] = useState('inspect')
   const [taught, setTaught] = useState(readTaughtProgram)
   const [toolValues, setToolValues] = useState(null)
+  // Pick & Place can mount the current CAD part on the flange and check the program for collisions.
+  const [toolMount, setToolMount] = useState(false)
+  const [clearance, setClearance] = useState(null)
   const [showAxes, setShowAxes] = useState(true)
   const [servicePose, setServicePose] = useState(keyframes[0].angles)
   const [serviceJoint, setServiceJoint] = useState(1)
@@ -107,10 +110,12 @@ export default function App() {
   })
   const [error, setError] = useState(false)
   const frameRef = useRef(0)
+  const overridesRef = useRef({})
   const cameraMoved = useRef(false)
   const program = workspace === 'teach' ? taught : workspace === 'pick' ? pickProgram : keyframes
   const lastFrame = workspace === 'teach' ? teachEnd : program.at(-1).frame
   const canPlay = ready && workspace !== 'service' && workspace !== 'cad' && (workspace !== 'teach' || taught.length > 1)
+  overridesRef.current = overrides
   const pose = useMemo(() => {
     if (workspace === 'service') return servicePose
     return sampleProgram(program, frame).map((angle, index) => overrides[index] ?? angle)
@@ -412,6 +417,26 @@ export default function App() {
     frameRef.current = frame
   }, [ready, frame, pose, workspace])
   useEffect(() => {
+    const api = viewport.current
+    if (!api || workspace !== 'pick') return
+    let current = true
+    setClearance((previous) => ({ ...previous, checking: true }))
+    async function mountAndCheck() {
+      const tracing = cadSource === 'trace'
+      const mesh = !toolMount ? null : tracing ? (traceSpec ? await runCad('mesh', traceSpec, 'trace') : null) : adapterMesh ?? await runCad('mesh', dimensions)
+      if (!current) return
+      const height = api.setToolPart(mesh, { turn: tracing && traceSpec?.mode === 'revolve' })
+      const collisions = api.checkClearance((at) => sampleProgram(pickProgram, at), pickProgram.at(-1).frame)
+      api.setPose(sampleProgram(pickProgram, frameRef.current).map((angle, index) => overridesRef.current[index] ?? angle), frameRef.current)
+      setToolValues(api.toolReadout())
+      setClearance({ checking: false, height, collisions, missing: toolMount && !mesh, part: tracing ? 'traced part' : 'flange adapter' })
+    }
+    mountAndCheck().catch((failure) => {
+      if (current) setClearance({ checking: false, error: failure?.message ?? String(failure) })
+    })
+    return () => { current = false }
+  }, [ready, workspace, toolMount, cadSource, traceSpec, adapterMesh, dimensions])
+  useEffect(() => {
     viewport.current?.configureService(serviceJoint, separation, serviceHidden, servicePart)
   }, [ready, workspace, serviceJoint, separation, serviceHidden, servicePart])
 
@@ -678,7 +703,8 @@ export default function App() {
             </div>}
             {(workspace === 'teach' || workspace === 'pick') && <ToolFrame values={toolValues} axes={showAxes} setAxes={setShowAxes} pick={workspace === 'pick'} />}
             {workspace === 'teach' && <TeachPanels {...{ pose, setJoint, frame, ready }} keys={taught} onSeek={(at) => { setPlaying(false); seek(at) }} onSave={savePose} onDelete={deletePose} />}
-            {workspace === 'pick' && <PickPanel frame={frame} seek={(at) => { setPlaying(false); seek(at) }} />}
+            {workspace === 'pick' && <PickPanel frame={frame} seek={(at) => { setPlaying(false); seek(at) }}
+              mount={toolMount} onMount={setToolMount} clearance={clearance} />}
             {workspace === 'service' && <ServicePanels joint={serviceJoint} setJoint={setServiceJoint} separation={separation} setSeparation={setSeparation}
               selected={servicePart} changeSelected={setServicePart} hidden={serviceHidden} toggleHidden={(id) => toggle(setServiceHidden, id)} />}
             {workspace === 'inspect' && <>

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { Axis3D, Box, ChevronDown, ChevronRight, Download, Eye, EyeOff, Layers3, Plus, ScanLine, SlidersHorizontal, Trash2, Wrench } from 'lucide-react'
+import { AlertTriangle, Axis3D, Box, CheckCircle2, ChevronDown, ChevronRight, Download, Eye, EyeOff, Layers3, Plus, ScanLine, SlidersHorizontal, Trash2, Wrench } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { joints } from './robot'
 import { driveIndex, drivePieceCount, driveTree } from './drive'
@@ -75,7 +75,28 @@ const phases = [
   { frame: 166, text: 'Retract and return' },
 ]
 
-export function PickPanel({ frame, seek }) {
+const seconds = (frame) => (frame / 30).toFixed(1)
+
+function ClearanceReport({ frame, seek, clearance }) {
+  if (!clearance || clearance.checking) return <p className="mode-copy">Checking the program for collisions…</p>
+  if (clearance.error) return <p className="cad-error" role="alert">Could not check clearance. {clearance.error}</p>
+  const { collisions } = clearance
+  if (!collisions.length) return <p className="clearance-ok"><CheckCircle2 size={14} /> No collisions with the trays, floor or arm over the whole program.</p>
+  return (
+    <>
+      <p className="clearance-warning"><AlertTriangle size={14} /> {collisions.length} {collisions.length === 1 ? 'collision' : 'collisions'} in the program.</p>
+      <ul className="phase-list clearance-list">
+        {collisions.map((hit) => <li key={hit.what + hit.with + hit.from}>
+          <button aria-current={frame >= hit.from && frame <= hit.to ? 'step' : undefined} onClick={() => seek(hit.from)}>
+            <i />{hit.what} hits {hit.with}<small>{hit.from === hit.to ? seconds(hit.from) : seconds(hit.from) + '–' + seconds(hit.to)} s</small>
+          </button>
+        </li>)}
+      </ul>
+    </>
+  )
+}
+
+export function PickPanel({ frame, seek, mount, onMount, clearance }) {
   const active = phases.findLastIndex((phase) => frame >= phase.frame)
   return (
     <section className="panel mode-panel">
@@ -83,9 +104,16 @@ export function PickPanel({ frame, seek }) {
       <div className="mode-panel-body">
         <ol className="phase-list">
           {phases.map(({ frame, text }, index) =>
-            <li key={frame}><button aria-current={active === index ? 'step' : undefined} onClick={() => seek(frame)}><i />{text}<small>{(frame / 30).toFixed(1)} s</small></button></li>,
+            <li key={frame}><button aria-current={active === index ? 'step' : undefined} onClick={() => seek(frame)}><i />{text}<small>{seconds(frame)} s</small></button></li>,
           )}
         </ol>
+        <div className="tool-mount">
+          <h4>Tool flange</h4>
+          <label className="trace-check"><input type="checkbox" checked={mount} onChange={(event) => onMount(event.target.checked)} /> Mount the CAD part between flange and gripper</label>
+          {mount && clearance?.missing && <p className="mode-copy">Build the traced part in CAD mode first.</p>}
+          {mount && clearance?.height > 0 && <p className="mode-copy">The {clearance.part} adds {clearance.height.toFixed(1)} mm, so the gripper and TCP sit that much further out. The taught positions are unchanged.</p>}
+          <ClearanceReport frame={frame} seek={seek} clearance={clearance} />
+        </div>
         <p className="mode-copy">Robotiq Hand-E, 50 mm stroke. <a href={gripperSource} target="_blank" rel="noreferrer">Manufacturer CAD source</a></p>
       </div>
     </section>

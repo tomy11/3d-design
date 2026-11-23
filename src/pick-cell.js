@@ -20,6 +20,7 @@ function material(color, metalness = 0.2) {
   return new T.MeshStandardMaterial({ color, metalness, roughness: 0.40 })
 }
 
+// Returns the tray's solid boxes, for clearance checks.
 function makeTray(scene, id, color, location) {
   const tray = new T.Group()
   tray.name = 'Tray_' + id
@@ -28,8 +29,10 @@ function makeTray(scene, id, color, location) {
   const graphite = material('#2a3643', 0.43)
   const accent = material(color, 0.30)
   const top = location.y - halfBlock
-  box(tray, 'Tray body', [0.158, top - 0.006, 0.14], graphite, 0, top / 2 - 0.003, 0)
-  box(tray, 'Tray top', [0.160, 0.006, 0.142], graphite, 0, top - 0.003, 0)
+  const solids = [
+    box(tray, 'Tray body', [0.158, top - 0.006, 0.14], graphite, 0, top / 2 - 0.003, 0),
+    box(tray, 'Tray top', [0.160, 0.006, 0.142], graphite, 0, top - 0.003, 0),
+  ]
   for (const x of [-0.074, 0.074]) box(tray, 'Tray side stripe', [0.005, 0.001, 0.13], accent, x, top, 0)
   for (const z of [-0.062, 0.062]) box(tray, 'Tray end stripe', [0.143, 0.001, 0.005], accent, 0, top, z)
   const canvas = document.createElement('canvas')
@@ -49,6 +52,7 @@ function makeTray(scene, id, color, location) {
   label.rotation.x = -Math.PI / 2
   label.position.set(0, top + 0.001, 0.039)
   tray.add(label)
+  return solids.map((mesh) => ({ name: 'Tray ' + id, mesh }))
 }
 
 export async function loadGripper() {
@@ -86,6 +90,8 @@ export function makePickCell(robot, gripper) {
     jaws[name] = joint
   }
 
+  // A part mounted on the flange pushes the gripper, and so the pinch point, out by its height.
+  let standoff = 0
   const matrices = { matrix: new T.Matrix4(), inverse: new T.Matrix4() }
   const offset = new T.Vector3()
   const pose = { position: new T.Vector3(), rotation: new T.Quaternion(), scale: new T.Vector3() }
@@ -94,7 +100,7 @@ export function makePickCell(robot, gripper) {
     matrices.inverse.copy(robot.plant.matrixWorld).invert()
     matrices.matrix.multiplyMatrices(matrices.inverse, robot.tool.matrixWorld)
     matrices.matrix.decompose(pose.position, pose.rotation, pose.scale)
-    pose.position.add(offset.set(0, 0, pinchOffset).applyQuaternion(pose.rotation))
+    pose.position.add(offset.set(0, 0, pinchOffset + standoff).applyQuaternion(pose.rotation))
     return pose
   }
 
@@ -105,8 +111,10 @@ export function makePickCell(robot, gripper) {
     return { position: position.clone(), rotation: rotation.clone() }
   })
   robot.setAngles(current)
-  makeTray(stations, 'A', '#f0c164', samples[0].position)
-  makeTray(stations, 'B', '#78bdce', samples[1].position)
+  const obstacles = [
+    ...makeTray(stations, 'A', '#f0c164', samples[0].position),
+    ...makeTray(stations, 'B', '#78bdce', samples[1].position),
+  ]
   const part = box(stations, 'Workpiece', [halfBlock * 2, halfBlock * 2, halfBlock * 2], material('#ffb446', 0.31), 0, 0, 0)
 
   let currentFrame = 0
@@ -122,6 +130,17 @@ export function makePickCell(robot, gripper) {
 
   function setVisible(visible) {
     gripper.visible = stations.visible = visible
+  }
+
+  function setStandoff(metres) {
+    standoff = metres
+    gripper.position.z = metres
+    update(currentFrame)
+  }
+
+  // Tints the gripper red while it collides with something.
+  function setWarning(on) {
+    for (const entry of Object.values(finish)) entry.emissive.set(on ? '#b3261e' : '#000000')
   }
 
   setVisible(false)
@@ -147,5 +166,5 @@ export function makePickCell(robot, gripper) {
     ]
   }
 
-  return { stations, gripper, update, setVisible, motionTracks }
+  return { stations, gripper, obstacles, update, setVisible, setStandoff, setWarning, motionTracks }
 }

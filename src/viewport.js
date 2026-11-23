@@ -5,6 +5,7 @@ import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js'
 import { hierarchy, joints, keyframes, loadRobot, makeMotionClip } from './robot'
 import { driveIndex, makeDrive } from './drive'
 import { loadGripper, makePickCell, pinchOffset } from './pick-cell'
+import { boxObstacle, checkClearance, nodeObstacle } from './clearance'
 import modelNotice from '../public/models/ur10e-license.txt?raw'
 import gripperNotice from '../public/models/robotiq-license.txt?raw'
 
@@ -115,6 +116,14 @@ export async function createViewport(element, { onSelect, onSelectDrive, onChang
   adapter.visible = false
   let displayedCadSource
   scene.add(adapter)
+  // In Pick & Place the CAD part can sit on the tool flange, between the flange and the gripper.
+  const toolPart = new T.Mesh(new T.BufferGeometry(), adapter.material.clone())
+  toolPart.name = 'Mounted CAD part'
+  toolPart.castShadow = toolPart.receiveShadow = true
+  toolPart.visible = false
+  robot.tool.add(toolPart)
+  let standoff = 0
+  let collisionFrames = new Set()
   // An imported mesh shown see-through over the traced solid, for comparison.
   const reference = new T.Mesh(
     new T.BufferGeometry(),
@@ -335,7 +344,7 @@ export async function createViewport(element, { onSelect, onSelectDrive, onChang
     robot.tool.updateWorldMatrix(true, false)
     baseInverse.copy(robot.basis.matrixWorld).invert()
     toolMatrix.multiplyMatrices(baseInverse, robot.tool.matrixWorld)
-    if (workspace === 'pick') toolMatrix.multiply(toolOffset)
+    if (workspace === 'pick') toolMatrix.multiply(toolOffset.makeTranslation(0, 0, pinchOffset + standoff))
     toolMatrix.decompose(readPosition, readRotation, readScale)
     readEuler.setFromQuaternion(readRotation)
     return {
@@ -391,6 +400,7 @@ export async function createViewport(element, { onSelect, onSelectDrive, onChang
         { id: 'gripper', name: 'Robotiq Hand-E', parent_id: 'wrist3', kind: 'gripper', visible: effectivelyVisible(pickCell.gripper) },
         { id: 'pick-station', name: 'Pick & Place station', parent_id: 'robot', kind: 'station', visible: effectivelyVisible(pickCell.stations) },
       )
+      if (standoff > 0) nodes.push({ id: 'mounted-part', name: 'Mounted CAD part', parent_id: 'wrist3', kind: 'tool_part', visible: effectivelyVisible(toolPart), height_mm: standoff * 1000 })
     }
     if (workspace === 'service') {
       nodes.push({ id: 'concept-drive', name: 'Concept joint drive', parent_id: joints[lastServiceJoint]?.id ?? 'robot', kind: 'concept_assembly', visible: effectivelyVisible(drive.root) })
@@ -571,8 +581,9 @@ export async function createViewport(element, { onSelect, onSelectDrive, onChang
       if (measuring) clearMeasurement()
       drive.root.visible = servicing
       pickCell.setVisible(next === 'pick')
+      toolPart.visible = standoff > 0 && next === 'pick'
       toolAxes.visible = showToolAxes && (next === 'teach' || next === 'pick')
-      toolAxes.position.z = next === 'pick' ? pinchOffset : 0
+      toolAxes.position.z = next === 'pick' ? pinchOffset + standoff : 0
       for (const [mesh, original] of externalMeshes) {
         mesh.material = servicing ? ghost : original
         mesh.castShadow = !servicing
@@ -602,8 +613,62 @@ export async function createViewport(element, { onSelect, onSelectDrive, onChang
       dirty = true
       robot.setAngles(angles)
       robotFrame = frame
-      if (workspace === 'pick') pickCell.update(frame)
+      if (workspace === 'pick') {
+        pickCell.update(frame)
+        const warning = collisionFrames.has(frame)
+        pickCell.setWarning(warning)
+        toolPart.material.emissive.set(warning ? '#b3261e' : '#000000')
+      }
       if (explosion) robot.separate(explosion)
+    },
+    // Mounts a CAD mesh (millimetres, as the kernel makes it) on the tool flange, or removes it with null.
+    // The part's lowest face sits on the flange; turn stands a revolved part's Y axis along the tool axis.
+    // Returns the part's height in millimetres, by which the gripper and TCP move out.
+    setToolPart(mesh, { turn = false } = {}) {
+      toolPart.geometry.dispose()
+      toolPart.geometry = new T.BufferGeometry()
+      standoff = 0
+      if (mesh?.positions.length) {
+        const geometry = toolPart.geometry
+        geometry.setAttribute('position', new T.BufferAttribute(mesh.positions.slice(), 3))
+        geometry.setAttribute('normal', new T.BufferAttribute(mesh.normals.slice(), 3))
+        geometry.setIndex(new T.BufferAttribute(mesh.indices.slice(), 1))
+        if (turn) geometry.rotateX(Math.PI / 2)
+        geometry.computeBoundingBox()
+        const { min, max } = geometry.boundingBox
+        geometry.translate(-(min.x + max.x) / 2, -(min.y + max.y) / 2, -min.z)
+        geometry.computeBoundingSphere()
+        standoff = max.z - min.z
+      }
+      toolPart.visible = standoff > 0 && workspace === 'pick'
+      pickCell.setStandoff(standoff)
+      if (workspace === 'pick') toolAxes.position.z = pinchOffset + standoff
+      collisionFrames = new Set()
+      dirty = true
+      return standoff * 1000
+    },
+    // Runs a program and reports when the gripper or mounted part enters a tray, the floor or the arm.
+    checkClearance(sample, frames) {
+      const saved = { angles: pivots.map((joint) => T.MathUtils.radToDeg(joint.rotation.z)), frame: robotFrame }
+      const gripperMeshes = []
+      pickCell.gripper.traverse((node) => { if (node.isMesh) gripperMeshes.push(node) })
+      const movers = [{ label: 'Gripper', meshes: gripperMeshes }]
+      if (standoff > 0) movers.push({ label: 'Mounted part', meshes: [toolPart] })
+      const obstacles = [
+        ...pickCell.obstacles.map(({ name, mesh }) => boxObstacle(name, mesh)),
+        // The links the tool can reach; the wrist links it is fixed to always touch it.
+        ...Object.entries({ base: 'Robot base', shoulder: 'Shoulder', upperarm: 'Upper arm', forearm: 'Forearm' })
+          .map(([id, name]) => nodeObstacle(name, linkVisuals[id])),
+      ]
+      const intervals = checkClearance({
+        root: plant, movers, obstacles, floorY: floor.position.y, frames,
+        setFrame: (frame) => { robot.setAngles(sample(frame)); pickCell.update(frame) },
+      })
+      robot.setAngles(saved.angles)
+      pickCell.update(saved.frame)
+      collisionFrames = new Set(intervals.flatMap(({ from, to }) => Array.from({ length: to - from + 1 }, (_, index) => from + index)))
+      dirty = true
+      return intervals
     },
     setExplosion(amount, reframe = false) {
       dirty = true
