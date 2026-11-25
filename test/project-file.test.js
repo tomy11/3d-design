@@ -81,3 +81,10 @@ test('decodeTrace keeps pocket depths, region heights and the edge finish', () =
   assert.deepEqual(trace.shape.edge, { kind: 'chamfer', size: 0.5 })
   assert.throws(() => decodeTrace({ ...saved, shape: { ...saved.shape, edge: { kind: 'chamfer', size: 500 } } }), /Invalid traced part/)
 })
+
+test('decodeProject keeps tool mounting, and older projects have none', () => {
+  assert.deepEqual(decodeProject(JSON.stringify(project()), context).pickTool, { mounted: false, retarget: false })
+  const mounted = { mounted: true, retarget: true }
+  assert.deepEqual(decodeProject(JSON.stringify(project({ pickTool: mounted })), context).pickTool, mounted)
+  assert.throws(() => decodeProject(JSON.stringify(project({ pickTool: { mounted: 1, retarget: false } })), context), /tool mounting/)
+})

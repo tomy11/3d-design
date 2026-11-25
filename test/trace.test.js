@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import {
-  defaultTraceSettings, fitCircle, groupRegions, isRoundView, signedArea, traceImage, traceLoops, traceToSpec, viewToMillimetres,
+  autoThreshold, blobFromDataUrl, defaultTraceSettings, fitCircle, groupRegions, isRoundView, signedArea, traceImage, traceLoops, traceToSpec, viewToMillimetres,
 } from '../src/trace.js'
 import { clipToAxis, validateTrace } from '../src/trace-spec.js'
 
@@ -141,4 +141,18 @@ test('validateTrace rejects bad depths, heights and edge sizes', () => {
   assert.match(validateTrace(spec([{ outer: box, holes: [], height: -3 }])), /not valid/)
   assert.match(validateTrace(spec([{ outer: box, holes: [] }], { kind: 'fillet', size: 0 })), /Edge rounding/)
   assert.match(validateTrace(spec([{ outer: box, holes: [] }], { kind: 'bevel', size: 1 })), /Edge rounding/)
+})
+
+test('the automatic threshold keeps the blurred edge pixels of a crisp image on the right side', () => {
+  // Black part (0), white background (255), and the two blurred pixel rows along its edge.
+  const values = [...Array(1000).fill(0), ...Array(60).fill(85), ...Array(60).fill(170), ...Array(1000).fill(255)]
+  const threshold = autoThreshold(Uint8Array.from(values))
+  assert.ok(threshold > 85 && threshold <= 170, 'threshold ' + threshold)
+})
+
+test('blobFromDataUrl decodes the bytes and type, and rejects anything else', async () => {
+  const blob = blobFromDataUrl('data:image/png;base64,iVBORw0KGgo=')
+  assert.equal(blob.type, 'image/png')
+  assert.deepEqual([...new Uint8Array(await blob.arrayBuffer())], [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+  assert.throws(() => blobFromDataUrl('https://example.com/a.png'), /not readable/)
 })

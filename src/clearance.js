@@ -1,11 +1,12 @@
 import * as T from 'three'
 
 // Checks a moving tool against fixed obstacles over a program, frame by frame.
-// The tool is sampled as points (its mesh vertices), and each obstacle is a box in its own
-// frame, so the check is conservative to within the sampling and the tolerance.
+// Every triangle of the tool is tested against each obstacle, which is a box in its own frame,
+// so a flat face crossing a tray is found even when none of its corners is inside.
+// Not covered: motion between frames, and an obstacle wholly swallowed by a closed tool part.
 
+// Boxes are shrunk by this much, so surfaces that only touch do not count.
 const tolerance = 0.001
-const pointsPerMesh = 1500
 
 // A box-shaped obstacle: a BoxGeometry mesh, tested exactly in its own frame.
 export function boxObstacle(name, mesh) {
@@ -27,41 +28,54 @@ export function nodeObstacle(name, node) {
   return { name, frame: node, half: box.getSize(new T.Vector3()).multiplyScalar(0.5), center: box.getCenter(new T.Vector3()) }
 }
 
-// Up to pointsPerMesh vertices of each mesh, in the mesh's own frame.
-function samplePoints(meshes) {
-  return meshes.map((mesh) => {
-    const position = mesh.geometry.attributes.position
-    const stride = Math.max(1, Math.ceil(position.count / pointsPerMesh))
-    const points = []
-    for (let index = 0; index < position.count; index += stride) points.push(new T.Vector3().fromBufferAttribute(position, index))
-    return { mesh, points }
-  })
+// A tool mesh ready for testing: its triangles' corners and bounding sphere in its own frame.
+function prepare(mesh) {
+  const { attributes: { position }, index } = mesh.geometry
+  const corners = Array.from({ length: position.count }, (_, at) => new T.Vector3().fromBufferAttribute(position, at))
+  const order = index ? Array.from(index.array) : corners.map((_, at) => at)
+  return { mesh, corners, order, sphere: new T.Sphere().setFromPoints(corners), moved: corners.map(() => new T.Vector3()) }
+}
+
+const triangle = new T.Triangle()
+function anyTriangleInside({ corners, order, moved }, box, matrix) {
+  for (let at = 0; at < corners.length; at++) moved[at].copy(corners[at]).applyMatrix4(matrix)
+  for (let at = 0; at + 2 < order.length; at += 3) {
+    triangle.set(moved[order[at]], moved[order[at + 1]], moved[order[at + 2]])
+    if (box.intersectsTriangle(triangle)) return true
+  }
+  return false
 }
 
 // movers: [{ label, meshes }]. setFrame(frame) poses the scene. floorY is the floor height in world units.
 // Returns [{ from, to, what, with }] for every run of consecutive colliding frames.
 export function checkClearance({ root, movers, obstacles, floorY, frames, setFrame }) {
-  const sampled = movers.map(({ label, meshes }) => ({ label, parts: samplePoints(meshes.filter((mesh) => mesh.geometry.attributes.position?.count)) }))
+  const tools = movers.flatMap(({ label, meshes }) => meshes.filter((mesh) => mesh.geometry.attributes.position?.count)
+    .map((mesh) => ({ label, ...prepare(mesh) })))
+  const targets = obstacles.map(({ name, frame, half, center }) => {
+    const inner = half.clone().subScalar(tolerance).max(new T.Vector3())
+    return { name, frame, box: new T.Box3(center.clone().sub(inner), center.clone().add(inner)), inverse: new T.Matrix4() }
+  })
   const world = new T.Vector3()
-  const local = new T.Vector3()
-  const inverses = obstacles.map(() => new T.Matrix4())
+  const sphere = new T.Sphere()
+  const matrix = new T.Matrix4()
   const hits = []
   for (let frame = 0; frame <= frames; frame++) {
     setFrame(frame)
     root.updateMatrixWorld(true)
-    obstacles.forEach((obstacle, index) => inverses[index].copy(obstacle.frame.matrixWorld).invert())
+    for (const target of targets) target.inverse.copy(target.frame.matrixWorld).invert()
     const found = new Set()
-    for (const { label, parts } of sampled) {
-      for (const { mesh, points } of parts) {
-        for (const point of points) {
-          world.copy(point).applyMatrix4(mesh.matrixWorld)
-          if (world.y < floorY - tolerance) found.add(label + '\u0000Floor')
-          obstacles.forEach((obstacle, index) => {
-            local.copy(world).applyMatrix4(inverses[index]).sub(obstacle.center)
-            if (Math.abs(local.x) < obstacle.half.x - tolerance && Math.abs(local.y) < obstacle.half.y - tolerance &&
-              Math.abs(local.z) < obstacle.half.z - tolerance) found.add(label + '\u0000' + obstacle.name)
-          })
-        }
+    for (const tool of tools) {
+      sphere.copy(tool.sphere).applyMatrix4(tool.mesh.matrixWorld)
+      const lowest = floorY - tolerance
+      if (sphere.center.y - sphere.radius < lowest &&
+        tool.corners.some((corner) => world.copy(corner).applyMatrix4(tool.mesh.matrixWorld).y < lowest)) found.add(tool.label + '\u0000Floor')
+      for (const target of targets) {
+        const key = tool.label + '\u0000' + target.name
+        if (found.has(key)) continue
+        matrix.multiplyMatrices(target.inverse, tool.mesh.matrixWorld)
+        // Most pairs are far apart: compare the tool's bounding sphere with the box first.
+        if (!target.box.intersectsSphere(sphere.copy(tool.sphere).applyMatrix4(matrix))) continue
+        if (anyTriangleInside(tool, target.box, matrix)) found.add(key)
       }
     }
     for (const key of found) hits.push({ frame, key })

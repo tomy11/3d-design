@@ -40,9 +40,16 @@ export function imageFromCanvas(canvas, name) {
   return imageFromSource(canvas, canvas.width, canvas.height, name, { maxSize: maxTraceSize })
 }
 
+// Decodes a base64 data URL. fetch() would do, but the desktop app's security policy blocks it.
+export function blobFromDataUrl(url) {
+  const [, type, data] = /^data:([^;,]+);base64,(.*)$/s.exec(url) ?? []
+  if (!type) throw new Error('The saved image is not readable.')
+  return new Blob([Uint8Array.from(atob(data), (character) => character.charCodeAt(0))], { type })
+}
+
 // Reopens an image saved in a project at its saved size, so traced pixel positions still match.
 export async function imageFromDataUrl(url, name) {
-  const bitmap = await createImageBitmap(await (await fetch(url)).blob())
+  const bitmap = await createImageBitmap(blobFromDataUrl(url))
   // The app never saves images larger than meshTraceSize; anything bigger is reduced and re-encoded.
   const size = Math.max(bitmap.width, bitmap.height)
   return imageFromSource(bitmap, bitmap.width, bitmap.height, name, { maxSize: meshTraceSize, url: size <= meshTraceSize ? url : undefined, lossless: url.startsWith('data:image/png') })
@@ -79,10 +86,13 @@ function analyse({ data, width, height }) {
       brightness[y * width + x] = Math.round(sum / count)
     }
   }
-  return { brightness, alpha, hasAlpha: transparent > raw.length * 0.02, autoThreshold: otsu(brightness) }
+  return { brightness, alpha, hasAlpha: transparent > raw.length * 0.02, autoThreshold: autoThreshold(brightness) }
 }
 
-function otsu(values) {
+// Otsu's split between dark and light, as the level halfway between the two sides' averages.
+// Halfway matters: blurred edge pixels sit between them, and a threshold at the dark end of
+// the gap would shave a pixel off every side of the part.
+export function autoThreshold(values) {
   const histogram = new Float64Array(256)
   for (const value of values) histogram[value]++
   let total = 0
@@ -102,7 +112,7 @@ function otsu(values) {
     const variance = background * foreground * (meanBackground - meanForeground) ** 2
     if (variance > bestVariance) {
       bestVariance = variance
-      best = level
+      best = Math.round((meanBackground + meanForeground) / 2)
     }
   }
   return best

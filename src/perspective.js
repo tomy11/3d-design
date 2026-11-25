@@ -1,4 +1,4 @@
-import { imageFromCanvas, maxTraceSize } from './trace.js'
+import { blobFromDataUrl, imageFromCanvas, maxTraceSize } from './trace.js'
 
 // Straightens a photo taken at an angle: four picked corners of a real rectangle (a sheet of
 // paper, a drawing border, the part's own square face) are mapped back to a true rectangle.
@@ -68,7 +68,7 @@ export function straightenedSize(quad, aspect = null) {
 }
 
 async function pixelsOf(image) {
-  const bitmap = await createImageBitmap(await (await fetch(image.url)).blob())
+  const bitmap = await createImageBitmap(blobFromDataUrl(image.url))
   const canvas = document.createElement('canvas')
   canvas.width = image.width
   canvas.height = image.height

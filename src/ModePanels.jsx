@@ -53,19 +53,24 @@ export function ToolFrame({ values, axes, setAxes, pick = false, onTarget = null
 const jogSteps = { position: [1, 10, 50], rotation: [1, 5, 15] }
 
 // A button that acts once on press, then repeats while held. Keyboard presses act once.
+// onRepeat gets an id that is the same for every repeat of one press.
+let presses = 0
 function RepeatButton({ onRepeat, ...props }) {
+  const latest = useRef(onRepeat)
+  latest.current = onRepeat
   const timer = useRef(null)
   const stop = () => { clearTimeout(timer.current); timer.current = null }
   useEffect(() => stop, [])
   function start(event) {
     if (event.button !== 0) return
     try { event.currentTarget.setPointerCapture(event.pointerId) } catch { /* the pointer may already be gone */ }
-    onRepeat()
-    const repeat = (delay) => { timer.current = setTimeout(() => { onRepeat(); repeat(90) }, delay) }
+    const press = 'jog' + ++presses
+    latest.current(press)
+    const repeat = (delay) => { timer.current = setTimeout(() => { latest.current(press); repeat(90) }, delay) }
     repeat(380)
   }
   return <Button {...props} onPointerDown={start} onPointerUp={stop} onPointerCancel={stop} onLostPointerCapture={stop}
-    onClick={(event) => { if (event.detail === 0) onRepeat() }} />
+    onClick={(event) => { if (event.detail === 0) onRepeat('jog' + ++presses) }} />
 }
 
 // Steps the TCP along or about the base or tool axes; inverse kinematics finds the joints.
@@ -96,10 +101,10 @@ function TcpJog({ onJog, ready, control, setControl }) {
             return (
               <div key={axis} className="jog-row">
                 <RepeatButton type="button" size="icon" variant="outline" disabled={!ready} aria-label={'Move ' + name + ' minus ' + amount + (turning ? '°' : ' mm')}
-                  onRepeat={() => onJog({ axis, amount: -amount })}><Minus size={14} /></RepeatButton>
+                  onRepeat={(gesture) => onJog({ axis, amount: -amount, gesture })}><Minus size={14} /></RepeatButton>
                 <span className={'axis axis-' + axis.at(-1)}>{name}</span>
                 <RepeatButton type="button" size="icon" variant="outline" disabled={!ready} aria-label={'Move ' + name + ' plus ' + amount + (turning ? '°' : ' mm')}
-                  onRepeat={() => onJog({ axis, amount })}><Plus size={14} /></RepeatButton>
+                  onRepeat={(gesture) => onJog({ axis, amount, gesture })}><Plus size={14} /></RepeatButton>
               </div>
             )
           })}

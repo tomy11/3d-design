@@ -37,3 +37,16 @@ test('nodeObstacle wraps every mesh of a node in the node frame', () => {
   const obstacle = nodeObstacle('Upper arm', node)
   assert.ok(Math.abs(obstacle.half.x - 0.2) < 1e-6 && Math.abs(obstacle.center.x - 0.3) < 1e-6)
 })
+
+test('a flat plate crossing a small tray is found though none of its corners is inside', () => {
+  const root = new T.Group()
+  const tray = new T.Mesh(new T.BoxGeometry(0.05, 0.1, 0.05))
+  const plate = new T.Mesh(new T.BoxGeometry(1, 0.004, 1))
+  root.add(tray, plate)
+  const run = (y) => checkClearance({
+    root, movers: [{ label: 'Mounted part', meshes: [plate] }], obstacles: [boxObstacle('Tray A', tray)], floorY: -1, frames: 0,
+    setFrame: () => plate.position.set(0, y, 0),
+  })
+  assert.deepEqual(run(0.02).map((hit) => hit.with), ['Tray A'])
+  assert.deepEqual(run(0.06), [])
+})

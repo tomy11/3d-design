@@ -125,6 +125,11 @@ export async function createViewport(element, { onSelect, onSelectDrive, onChang
   robot.tool.add(toolPart)
   let standoff = 0
   let collisionFrames = new Set()
+  function showWarning(on) {
+    pickCell.setWarning(on)
+    toolPart.material.emissive.set(on ? '#b3261e' : '#000000')
+    dirty = true
+  }
   // An imported mesh shown see-through over the traced solid, for comparison.
   const reference = new T.Mesh(
     new T.BufferGeometry(),
@@ -238,6 +243,7 @@ export async function createViewport(element, { onSelect, onSelectDrive, onChang
   tcpHandle.enabled = false
   scene.add(tcpHelper)
   let tcpReachable = true
+  let tcpDrag = 0
   function syncTcpTarget() {
     robot.tool.updateWorldMatrix(true, false)
     robot.tool.matrixWorld.decompose(tcpTarget.position, tcpTarget.quaternion, tcpTarget.scale)
@@ -245,7 +251,8 @@ export async function createViewport(element, { onSelect, onSelectDrive, onChang
   }
   tcpHandle.addEventListener('dragging-changed', (event) => {
     orbit.enabled = !event.value
-    if (!event.value) {
+    if (event.value) tcpDrag += 1
+    else {
       // Snap back onto the real TCP, which stopped at the last reachable pose.
       syncTcpTarget()
       if (!tcpReachable) onTcpMove(null)
@@ -265,7 +272,7 @@ export async function createViewport(element, { onSelect, onSelectDrive, onChang
     if (!result.converged) return
     robot.setAngles(result.angles)
     dirty = true
-    onTcpMove(result.angles)
+    onTcpMove(result.angles, tcpDrag)
   })
 
   let selected = 'upperarm'
@@ -720,9 +727,7 @@ export async function createViewport(element, { onSelect, onSelectDrive, onChang
       robotFrame = frame
       if (workspace === 'pick') {
         pickCell.update(frame)
-        const warning = collisionFrames.has(frame)
-        pickCell.setWarning(warning)
-        toolPart.material.emissive.set(warning ? '#b3261e' : '#000000')
+        showWarning(collisionFrames.has(frame))
       }
       if (explosion) robot.separate(explosion)
     },
@@ -847,6 +852,8 @@ export async function createViewport(element, { onSelect, onSelectDrive, onChang
     },
     async export({ service, pick, clipName, duration, sample }) {
       const { GLTFExporter } = await import('three/addons/exporters/GLTFExporter.js')
+      // The collision tint is feedback on screen, not part of the model.
+      showWarning(false)
       const snapshot = service ? drive.assembledClone() : plant.clone()
       const exporter = new GLTFExporter()
       if (service) {
@@ -857,6 +864,7 @@ export async function createViewport(element, { onSelect, onSelectDrive, onChang
       }
       const excluded = [drive.root.name, toolAxes.name]
       if (!pick) excluded.push(pickCell.stations.name, pickCell.gripper.name)
+      if (!pick || !standoff) excluded.push(toolPart.name)
       for (const name of excluded) {
         snapshot.getObjectByName(name)?.removeFromParent()
       }
@@ -870,7 +878,12 @@ export async function createViewport(element, { onSelect, onSelectDrive, onChang
         animations[0].tracks.push(...pickCell.motionTracks(duration, sample))
         animations[0].resetDuration()
       }
-      const buffer = await exporter.parseAsync(snapshot, { binary: true, onlyVisible: false, animations })
+      let buffer
+      try {
+        buffer = await exporter.parseAsync(snapshot, { binary: true, onlyVisible: false, animations })
+      } finally {
+        showWarning(workspace === 'pick' && collisionFrames.has(robotFrame))
+      }
       download(buffer, pick ? 'ur10e-pick-and-place.glb' : 'universal-robots-ur10e.glb')
     },
     dispose() {

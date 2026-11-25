@@ -117,6 +117,7 @@ export default function App() {
   const [error, setError] = useState(false)
   const frameRef = useRef(0)
   const dragTcpRef = useRef(() => {})
+  const sliding = useRef({ id: 0, index: -1, at: 0 })
   const overridesRef = useRef({})
   const cameraMoved = useRef(false)
   const program = workspace === 'teach' ? taught : workspace === 'pick' ? pickKeys : keyframes
@@ -140,6 +141,22 @@ export default function App() {
     setHistoryVersion((version) => version + 1)
   }
 
+  // Jogs the arm. Edits with the same gesture (one drag, one held button) make a single undo step.
+  function editPose(next, label, gesture) {
+    setPlaying(false)
+    const before = { workspace, frame: frameRef.current, overrides: overridesRef.current }
+    const after = { ...before, overrides: next }
+    const last = history.current.undo.at(-1)
+    if (gesture && last?.type === 'pose' && last.gesture === gesture && !history.current.redo.length) {
+      last.after = after
+      editRevision.current += 1
+    } else recordChange({ type: 'pose', label, gesture, before, after })
+    // Set at once so the next event of a fast gesture builds on this one.
+    overridesRef.current = next
+    poseRef.current = poseRef.current.map((angle, index) => next[index] ?? angle)
+    setOverrides(next)
+  }
+
   function moveHistory(direction) {
     if (adapterCommands.getSnapshot().building) return
     const from = history.current[direction]
@@ -151,6 +168,12 @@ export default function App() {
     if (change.type === 'trace') traced.setTrace(value)
     if (change.type === 'transform') viewport.current?.restoreTransform(change.id, value)
     if (change.type === 'visibility') setHidden(value)
+    if (change.type === 'pose') {
+      setPlaying(false)
+      if (value.workspace !== workspace) switchWorkspace(value.workspace)
+      setFrame(value.frame)
+      setOverrides(value.overrides)
+    }
     if (change.type === 'taught') {
       setPlaying(false)
       setTaught(value)
@@ -189,6 +212,8 @@ export default function App() {
     const snapshot = decodeProject(source, { modes: modes.map(({ id }) => id), parts: Object.keys(parts), joints })
     await traced.restore(snapshot.traced)
     setCadSource(snapshot.cadSource)
+    setToolMount(snapshot.pickTool.mounted)
+    setRetarget(snapshot.pickTool.retarget)
     setPlaying(false)
     setWorkspace(snapshot.workspace)
     setView('orbit')
@@ -246,7 +271,7 @@ export default function App() {
         workspace, frame, pose, taught, adapter: adapterCommands.get_body().dimensions, selected, hidden, isolated, expanded,
         grid, wireframe, snap, section, showAxes, explosion,
         service: { joint: serviceJoint, part: servicePart, hidden: serviceHidden, separation },
-        cadSource, trace: traced.serialize(),
+        cadSource, trace: traced.serialize(), pickTool: { mounted: toolMount, retarget },
         ...viewport.current.captureScene(),
       })
       if (outcome) setNotice('Project saved.')
@@ -349,21 +374,22 @@ export default function App() {
   }
 
   function setJoint(index, angle) {
-    setPlaying(false)
-    if (pose[index] !== angle) editRevision.current += 1
-    setOverrides((previous) => ({ ...previous, [index]: angle }))
+    // Slider events closer together than this belong to one drag.
+    const now = performance.now()
+    const slide = sliding.current
+    if (slide.index !== index || now - slide.at > 800) slide.id += 1
+    Object.assign(slide, { index, at: now })
+    editPose({ ...overridesRef.current, [index]: angle }, joints[index].joint + ' angle', 'slider' + slide.id)
   }
 
   // Moves the TCP by inverse kinematics; the joints change only when the pose is reachable.
-  function applyTcpSolution(result, what) {
+  function applyTcpSolution(result, what, gesture) {
     if (!result) return false
     if (!result.converged) {
       setNotice(what + ' is out of reach' + (result.position > 1e-4 ? ' (' + (result.position * 1000).toFixed(1) + ' mm short)' : '') + '. The arm did not move.')
       return false
     }
-    setPlaying(false)
-    editRevision.current += 1
-    setOverrides(Object.fromEntries(result.angles.map((angle, index) => [index, angle])))
+    editPose(Object.fromEntries(result.angles.map((angle, index) => [index, angle])), 'TCP move', gesture)
     return true
   }
 
@@ -372,18 +398,16 @@ export default function App() {
   }
 
   // Reads the latest pose, so repeated steps while a button is held keep adding up.
-  function jogTcp(jog) {
-    return applyTcpSolution(viewport.current?.jogTcp(poseRef.current, { ...jog, frame: tcpControl.frame }), 'The next step')
+  function jogTcp({ gesture, ...jog }) {
+    return applyTcpSolution(viewport.current?.jogTcp(poseRef.current, { ...jog, frame: tcpControl.frame }), 'The next step', gesture)
   }
 
-  function dragTcp(angles) {
+  function dragTcp(angles, drag) {
     if (!angles) {
       setNotice('That point is out of reach. The arm stopped at the last reachable pose.')
       return
     }
-    setPlaying(false)
-    editRevision.current += 1
-    setOverrides(Object.fromEntries(angles.map((angle, index) => [index, angle])))
+    editPose(Object.fromEntries(angles.map((angle, index) => [index, angle])), 'TCP drag', 'drag' + drag)
   }
 
   function togglePlayback() {
@@ -413,7 +437,7 @@ export default function App() {
       onTransform: (change) => recordChange({ ...change, type: 'transform', label: 'object transform' }),
       onChange: () => setTransformVersion((version) => version + 1),
       onOrbit: () => { cameraMoved.current = true; setView('orbit') },
-      onTcpMove: (angles) => dragTcpRef.current(angles),
+      onTcpMove: (angles, drag) => dragTcpRef.current(angles, drag),
     }).then((api) => {
       if (controller.signal.aborted) {
         api.dispose()
@@ -482,7 +506,10 @@ export default function App() {
       })
     }
     mountAndCheck().catch((failure) => {
-      if (current) setClearance({ checking: false, error: failure?.message ?? String(failure) })
+      if (!current) return
+      api.setToolPart(null)
+      setPickKeys(pickProgram)
+      setClearance({ checking: false, error: failure?.message ?? String(failure) })
     })
     return () => { current = false }
   }, [ready, workspace, toolMount, retarget, cadSource, traceSpec, adapterMesh, dimensions])

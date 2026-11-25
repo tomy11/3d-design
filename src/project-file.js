@@ -71,6 +71,9 @@ export function decodeProject(source, { modes, parts, joints }) {
     id(service.part, driveIds) && ids(service.hidden, driveIds), 'Invalid service settings.')
   // Traced parts were added later, so older projects have none.
   clause(document.cadSource === undefined || ['adapter', 'trace'].includes(document.cadSource), 'Invalid CAD source.')
+  // So was mounting a part on the tool flange in Pick & Place.
+  const pickTool = document.pickTool ?? { mounted: false, retarget: false }
+  clause([pickTool.mounted, pickTool.retarget].every((value) => typeof value === 'boolean'), 'Invalid tool mounting.')
   const traced = document.trace === undefined ? null : decodeTrace(document.trace)
-  return { ...document, traced, cadSource: document.cadSource ?? 'adapter', adapter: Object.fromEntries(adapterFields.map(({ id: key }) => [key, adapter[key]])) }
+  return { ...document, traced, pickTool: { mounted: pickTool.mounted, retarget: pickTool.retarget }, cadSource: document.cadSource ?? 'adapter', adapter: Object.fromEntries(adapterFields.map(({ id: key }) => [key, adapter[key]])) }
 }
